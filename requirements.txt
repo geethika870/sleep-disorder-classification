@@ -1,12 +1,10 @@
 streamlit
 pandas
 numpy
-scikit-learn
-tensorflow
+scikit-learn==1.5.2
+xgboost
+lightgbm
+catboost
+imbalanced-learn
 matplotlib
 seaborn
-shap
-xgboost
-tpot
-imbalanced-learn
-optuna
