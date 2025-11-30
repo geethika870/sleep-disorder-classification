@@ -20,15 +20,24 @@ SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 
-st.set_page_config(page_title="😴 Sleep Disorder Prediction", layout="wide")
+# Updated website name
+st.set_page_config(
+    page_title="Sleep Disorder Classification and Prediction",
+    layout="wide"
+)
+
+# Sidebar navigation (Home added as default)
 st.sidebar.title("⚙ Navigation")
-page = st.sidebar.radio("Go to:", ["📂 Upload Dataset", "🚀 Train Models", "🔮 Predict Disorder", "📊 Interpretability"])
+page = st.sidebar.radio(
+    "Go to:",
+    ["🏠 Home", "📂 Upload Dataset", "🚀 Train Models", "🔮 Predict Disorder", "📊 Interpretability"]
+)
 
 # -------------------
 # FIXED LGBMWrapper CLASS (correct dunder names)
 # -------------------
 class LGBMWrapper:
-    def __init__(self, model):
+    def _init_(self, model):
         self.model = model
 
     def fit(self, X, y):
@@ -40,7 +49,7 @@ class LGBMWrapper:
     def predict_proba(self, X):
         return self.model.predict_proba(X)
 
-    def __getattr__(self, attr):
+    def _getattr_(self, attr):
         return getattr(self.model, attr)
 
 def save_model(best_model, scaler, label_encoders, feature_order):
@@ -61,8 +70,60 @@ def load_model_file():
             return None, None, None, None
     return None, None, None, None
 
+# 🏠 Home Page
+if page == "🏠 Home":
+    st.title("😴 Sleep Disorder Classification and Prediction")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.header("Why is Sleep Important?")
+        st.markdown("""
+        - Sleep is essential for *memory, **concentration, and **emotional balance*.  
+        - Poor sleep increases risk of *heart disease, obesity, diabetes, and depression*.  
+        - Chronic sleep problems can seriously affect *work performance* and *quality of life*.
+        """)
+
+        st.header("What are Sleep Disorders?")
+        st.markdown("""
+        Common sleep disorders include:
+        - *Insomnia* – difficulty falling or staying asleep  
+        - *Sleep Apnea* – pauses in breathing during sleep  
+        - *Narcolepsy* – sudden sleep attacks during the day  
+        - *Restless Leg Syndrome* – uncomfortable leg sensations at night  
+
+        Early detection of sleep disorders can help in:
+        - Getting timely *medical help*  
+        - Improving *lifestyle and sleep hygiene*  
+        - Reducing long-term *health risks*
+        """)
+
+    with col2:
+        st.header("About This Web App")
+        st.markdown("""
+        This tool uses *Machine Learning* to classify and predict possible sleep disorders
+        based on user data (like age, BMI, sleep duration, stress level, etc., depending on the dataset).
+
+        *What you can do here:*
+        1. *Upload Dataset* – Provide a CSV file containing sleep-related data.  
+        2. *Train Models* – Automatically train multiple ML models and compare their accuracy.  
+        3. *Predict Disorder* – Use the best model to predict sleep disorder for:
+           - Single users (manual input)  
+           - Multiple users (bulk CSV upload)  
+        4. *Interpretability* – View feature importance to understand which factors most affect predictions.
+        """)
+
+        st.header("How to Use Step-by-Step")
+        st.markdown("""
+        1. Go to *📂 Upload Dataset* and upload your CSV.  
+        2. Then open *🚀 Train Models* to train and compare ML models.  
+        3. After training, use *🔮 Predict Disorder* for predictions.  
+        4. Finally, check *📊 Interpretability* to see which features are most important.
+        """)
+
+    st.info("Use the navigation sidebar on the left to get started with your data.")
+
 # 📂 Upload Dataset
-if page == "📂 Upload Dataset":
+elif page == "📂 Upload Dataset":
     st.title("📂 Upload Sleep Dataset")
     file = st.file_uploader("Upload CSV", type=["csv"])
     if file:
@@ -117,7 +178,9 @@ elif page == "🚀 Train Models":
                 X_res, y_res = X, y
 
             X_train, X_test, y_train, y_test = train_test_split(
-                X_res, y_res, test_size=0.2, stratify=y_res if len(np.unique(y_res)) > 1 else None, random_state=SEED
+                X_res, y_res, test_size=0.2,
+                stratify=y_res if len(np.unique(y_res)) > 1 else None,
+                random_state=SEED
             )
 
             scaler = StandardScaler()
