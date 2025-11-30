@@ -15,6 +15,8 @@ from imblearn.combine import SMOTETomek
 from sklearn.inspection import permutation_importance
 import matplotlib.pyplot as plt
 import seaborn as sns
+import warnings
+warnings.filterwarnings('ignore')
 
 SEED = 42
 random.seed(SEED)
@@ -26,7 +28,7 @@ page = st.sidebar.radio("Go to:", ["📂 Upload Dataset", "🚀 Train Models", "
 
 # ✅ FIXED LGBMWrapper CLASS
 class LGBMWrapper:
-    def _init_(self, model):
+    def __init__(self, model):
         self.model = model
 
     def fit(self, X, y):
@@ -38,7 +40,7 @@ class LGBMWrapper:
     def predict_proba(self, X):
         return self.model.predict_proba(X)
 
-    def _getattr_(self, attr):
+    def __getattr__(self, attr):
         return getattr(self.model, attr)
 
 def save_model(best_model, scaler, label_encoders, feature_order):
@@ -71,7 +73,7 @@ if page == "📂 Upload Dataset":
 elif page == "🚀 Train Models":
     st.title("🚀 Train and Compare Models")
     if "df" not in st.session_state:
-        st.warning("Upload dataset first!")
+        st.warning("⚠️ Please upload dataset first!")
     else:
         df = st.session_state.df.copy()
 
@@ -115,7 +117,7 @@ elif page == "🚀 Train Models":
         acc_df["Accuracy"] = (acc_df["Accuracy"] * 100).round(2)
         st.table(acc_df)
 
-        best_model_name = acc_df.iloc[acc_df["Accuracy"].idxmax()]["Model"]
+        best_model_name = acc_df.loc[acc_df["Accuracy"].idxmax(), "Model"]
         st.success(f"🏆 Best Model: {best_model_name}")
 
         st.session_state.best_model = models[best_model_name]
@@ -124,7 +126,7 @@ elif page == "🚀 Train Models":
         st.session_state.feature_order = list(X.columns)
 
         cm = confusion_matrix(y_test, models[best_model_name].predict(X_test_scaled))
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(figsize=(8, 6))
         sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax)
         st.pyplot(fig)
 
@@ -136,23 +138,32 @@ elif page == "🚀 Train Models":
 elif page == "🔮 Predict Disorder":
     st.title("🔮 Predict Sleep Disorder")
     if "best_model" not in st.session_state:
-        st.warning("Train or load a model first!")
+        st.warning("⚠️ Please train a model first!")
     else:
         mode = st.radio("Prediction Mode", ["Manual Input", "Bulk Prediction"])
 
         if mode == "Manual Input":
-            gender = st.selectbox("Gender", ["Male", "Female"])
-            age = st.slider("Age", 1, 100, 25)
-            occupation = st.selectbox("Occupation", ["Software Engineer", "Doctor", "Nurse", "Teacher", "Manager", "Student"])
-            sleep_dur = st.slider("Sleep Duration", 3.0, 12.0, 7.0)
-            q_sleep = st.slider("Quality of Sleep", 1, 10, 7)
-            phys_act = st.slider("Physical Activity Level", 0, 100, 50)
-            stress = st.slider("Stress Level", 1, 10, 5)
-            bmi_cat = st.selectbox("BMI Category", ["Normal", "Overweight", "Obese", "Underweight"])
-            sys_bp = st.slider("Systolic BP", 80, 180, 120)
-            dia_bp = st.slider("Diastolic BP", 50, 120, 80)
-            hr = st.slider("Heart Rate", 40, 120, 70)
-            steps = st.slider("Daily Steps", 0, 20000, 5000)
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                gender = st.selectbox("Gender", ["Male", "Female"])
+                age = st.slider("Age", 1, 100, 25)
+            with col2:
+                occupation = st.selectbox("Occupation", ["Software Engineer", "Doctor", "Nurse", "Teacher", "Manager", "Student"])
+                sleep_dur = st.slider("Sleep Duration (hrs)", 3.0, 12.0, 7.0)
+            with col3:
+                q_sleep = st.slider("Quality of Sleep", 1, 10, 7)
+                phys_act = st.slider("Physical Activity (%)", 0, 100, 50)
+
+            col4, col5, col6 = st.columns(3)
+            with col4:
+                stress = st.slider("Stress Level", 1, 10, 5)
+                bmi_cat = st.selectbox("BMI Category", ["Normal", "Overweight", "Obese", "Underweight"])
+            with col5:
+                sys_bp = st.slider("Systolic BP", 80, 180, 120)
+            with col6:
+                dia_bp = st.slider("Diastolic BP", 50, 120, 80)
+                hr = st.slider("Heart Rate (bpm)", 40, 120, 70)
+                steps = st.slider("Daily Steps", 0, 20000, 5000)
 
             user_data = pd.DataFrame([{
                 "Gender": gender, "Age": age, "Occupation": occupation,
@@ -170,16 +181,16 @@ elif page == "🔮 Predict Disorder":
 
             user_data = user_data[st.session_state.feature_order]
 
-            if st.button("🔮 Predict"):
+            if st.button("🔮 Predict Disorder", type="primary"):
                 scaled = st.session_state.scaler.transform(user_data)
                 pred_num = st.session_state.best_model.predict(scaled)[0]
                 target_encoder = st.session_state.label_encoders["Sleep Disorder"]
                 pred_label = target_encoder.inverse_transform([pred_num])[0]
-
-                st.success(f"🩺 Predicted Sleep Disorder: {pred_label}")
+                st.success(f"🩺 **Predicted Sleep Disorder: {pred_label}**")
+                st.balloons()
 
         else:
-            file = st.file_uploader("Upload CSV without Sleep Disorder", type=["csv"])
+            file = st.file_uploader("Upload CSV (without Sleep Disorder column)", type=["csv"])
             if file:
                 new_df = pd.read_csv(file)
                 if "Blood Pressure" in new_df.columns:
@@ -199,15 +210,16 @@ elif page == "🔮 Predict Disorder":
                 preds_labels = target_encoder.inverse_transform(preds)
 
                 new_df["Predicted_Sleep_Disorder"] = preds_labels
-                st.dataframe(new_df.head())
+                st.dataframe(new_df)
+                st.download_button("💾 Download Predictions", new_df.to_csv(index=False), "predictions.csv")
 
 # 📊 Interpretability
 elif page == "📊 Interpretability":
-    st.title("📊 Model Interpretability - Feature Importance")
+    st.title("📊 Model Interpretability")
     if "best_model" not in st.session_state:
-        st.warning("Train or load a model first!")
+        st.warning("⚠️ Please train a model first!")
     elif "df" not in st.session_state:
-        st.warning("Upload dataset first!")
+        st.warning("⚠️ Please upload dataset first!")
     else:
         best_model = st.session_state.best_model
         scaler = st.session_state.scaler
@@ -231,18 +243,25 @@ elif page == "📊 Interpretability":
 
         X_scaled = scaler.transform(X)
 
-        st.info("⏳ Calculating permutation importance...")
-
-        result = permutation_importance(
-            best_model, X_scaled, y_encoded,
-            n_repeats=10, random_state=SEED, scoring="accuracy"
-        )
+        with st.spinner("⏳ Calculating feature importance..."):
+            result = permutation_importance(
+                best_model, X_scaled, y_encoded,
+                n_repeats=10, random_state=SEED, scoring="accuracy"
+            )
 
         sorted_idx = result.importances_mean.argsort()[::-1]
+        importance_df = pd.DataFrame({
+            'Feature': np.array(feature_order)[sorted_idx],
+            'Importance': result.importances_mean[sorted_idx]
+        })
 
-        fig, ax = plt.subplots(figsize=(10, 6))
-        sns.barplot(x=result.importances_mean[sorted_idx], y=np.array(feature_order)[sorted_idx], ax=ax)
-        ax.set_title("Permutation Feature Importance")
-        ax.set_xlabel("Mean Importance")
+        fig, ax = plt.subplots(figsize=(10, 8))
+        sns.barplot(data=importance_df, y='Feature', x='Importance', ax=ax)
+        ax.set_title("🔍 Permutation Feature Importance")
+        ax.set_xlabel("Mean Importance Score")
         st.pyplot(fig)
-        st.success("✅ Feature importance calculated successfully!")
+
+        st.subheader("📋 Top Features")
+        st.dataframe(importance_df.head(10))
+        st.success("✅ Analysis complete!")
+
