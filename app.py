@@ -28,7 +28,7 @@ page = st.sidebar.radio("Go to:", ["📂 Upload Dataset", "🚀 Train Models", "
 # FIXED LGBMWrapper CLASS (correct dunder names)
 # -------------------
 class LGBMWrapper:
-    def __init__(self, model):
+    def _init_(self, model):
         self.model = model
 
     def fit(self, X, y):
@@ -40,7 +40,7 @@ class LGBMWrapper:
     def predict_proba(self, X):
         return self.model.predict_proba(X)
 
-    def __getattr__(self, attr):
+    def _getattr_(self, attr):
         return getattr(self.model, attr)
 
 def save_model(best_model, scaler, label_encoders, feature_order):
@@ -324,4 +324,3 @@ elif page == "📊 Interpretability":
             st.success("✅ Feature importance calculated successfully!")
         except Exception as e:
             st.error(f"Permutation importance failed: {e}")
-
