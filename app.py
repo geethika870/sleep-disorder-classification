@@ -9,6 +9,8 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.metrics import accuracy_score
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
 
 SEED = 42
 
@@ -18,7 +20,8 @@ page = st.sidebar.radio("Navigation", [
     "📤 Upload Data",
     "🚀 Train & Compare Models",
     "💾 Save/Load Best Model",
-    "🔮 Predict Disorder"
+    "🔮 Predict Disorder",
+    "📊 Interpretability"
 ])
 
 # ---------------- PAGE 1: UPLOAD DATA ----------------
@@ -28,8 +31,13 @@ if page == "📤 Upload Data":
 
     if file:
         df = pd.read_csv(file)
+
+        # ✅ Remove rows where target is NaN
+        if "Sleep Disorder" in df.columns:
+            df = df.dropna(subset=["Sleep Disorder"])
+
         st.session_state.df = df
-        st.success("✅ Dataset Uploaded!")
+        st.success("✅ Dataset Uploaded & Cleaned!")
         st.dataframe(df.head())
 
 # ---------------- PAGE 2: TRAIN ALL MODELS + PICK BEST ----------------
@@ -41,7 +49,10 @@ elif page == "🚀 Train & Compare Models":
     else:
         df = st.session_state.df.copy()
 
-        # Encode categorical columns
+        # ✅ Ensure target has no NaN
+        df = df.dropna(subset=["Sleep Disorder"])
+
+        # Encode categorical columns safely
         encoders = {}
         for col in df.select_dtypes(include="object").columns:
             if col != "Sleep Disorder":
@@ -59,7 +70,9 @@ elif page == "🚀 Train & Compare Models":
         X_scaled = scaler.fit_transform(X)
         st.session_state.scaler = scaler
 
-        # Define models
+        # ✅ Train/Test split for proper accuracy comparison
+        X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=SEED)
+
         models = {
             "SVM": SVC(probability=True, random_state=SEED),
             "Random Forest": RandomForestClassifier(n_estimators=200, random_state=SEED),
@@ -72,27 +85,20 @@ elif page == "🚀 Train & Compare Models":
         best_acc = 0
         best_model = None
 
-        progress = st.progress(0)
-        total = len(models)
-
-        for i, (name, model) in enumerate(models.items()):
+        for name, model in models.items():
             with st.spinner(f"Training {name}..."):
-                model.fit(X_scaled, y)
-                preds = model.predict(X_scaled)
-                acc = accuracy_score(y, preds)
+                model.fit(X_train, y_train)
+                preds = model.predict(X_test)
+                acc = accuracy_score(y_test, preds)
                 report.append((name, acc))
 
                 if acc > best_acc:
                     best_acc = acc
                     best_model = model
 
-            progress.progress(int(((i+1)/total)*100))
-
-        # Store best
         st.session_state.best_model = best_model
         st.session_state.best_acc = best_acc
 
-        # Display comparison
         result_df = pd.DataFrame(report, columns=["Model", "Accuracy"])
         st.dataframe(result_df.sort_values(by="Accuracy", ascending=False))
         st.success(f"🏆 Best Model Selected with {round(best_acc*100, 2)}% Accuracy!")
@@ -132,20 +138,23 @@ elif page == "🔮 Predict Disorder":
         encoders = st.session_state.label_encoders
         order = st.session_state.feature_order
 
-        upload = st.file_uploader("Upload CSV without Sleep Target", type=["csv"])
+        upload = st.file_uploader("Upload CSV without Sleep Disorder", type=["csv"])
         if upload:
             new_df = pd.read_csv(upload)
 
+            # ✅ Encode categorical safely
             for col, le in encoders.items():
                 if col in new_df.columns:
                     new_df[col] = new_df[col].map(lambda x: x if str(x) in le.classes_ else le.classes_[0])
                     new_df[col] = le.transform(new_df[col].astype(str))
 
+            # ✅ Add missing columns in correct order
             for f in order:
                 if f not in new_df.columns:
                     new_df[f] = 0
 
-            new_df = new_df[order].astype(float)
+            # ✅ No astype crash anymore
+            new_df = new_df[order]
             X_scaled = scaler.transform(new_df)
 
             out = model.predict(X_scaled)
@@ -158,3 +167,35 @@ elif page == "🔮 Predict Disorder":
             with open("prediction_results.csv", "rb") as dl:
                 st.download_button("📥 Download Predictions", dl, "Predictions.csv")
 
+# ---------------- PAGE 5: INTERPRETABILITY ----------------
+elif page == "📊 Interpretability":
+    st.title("📊 Feature Importance")
+
+    if "best_model" not in st.session_state:
+        st.warning("Train or load model first!")
+    elif "df" not in st.session_state:
+        st.warning("Upload dataset first!")
+    else:
+        df = st.session_state.df.copy()
+        model = st.session_state.best_model
+        scaler = st.session_state.scaler
+        order = st.session_state.feature_order
+        encoders = st.session_state.label_encoders
+
+        # ✅ Encode again safely
+        for col, le in encoders.items():
+            if col in df.columns and col != "Sleep Disorder":
+                df[col] = df[col].map(lambda x: x if str(x) in le.classes_ else le.classes_[0])
+                df[col] = le.transform(df[col].astype(str))
+
+        X = df.drop("Sleep Disorder", axis=1)[order]
+        X_scaled = scaler.transform(X)
+        y = df["Sleep Disorder"]
+
+        # ✅ Plot Importance
+        result = model.feature_importances_ if hasattr(model, "feature_importances_") else permutation_importance(model, X_scaled, y, n_repeats=5).importances_mean
+
+        fig, ax = plt.subplots(figsize=(10,5))
+        ax.barh(order, result)
+        ax.invert_yaxis()
+        st.pyplot(fig)
