@@ -1,75 +1,97 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import pickle, joblib, os, random
+import pickle, os, random, time
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.metrics import accuracy_score, confusion_matrix
-from sklearn.svm import SVC
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score
 from sklearn.neural_network import MLPClassifier
-from xgboost import XGBClassifier
-from lightgbm import LGBMClassifier
-from catboost import CatBoostClassifier
 from imblearn.combine import SMOTETomek
-from sklearn.inspection import permutation_importance
-import matplotlib.pyplot as plt
-import seaborn as sns
 
+# ==============================
+# FIXED SEED
+# ==============================
 SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 
-st.set_page_config(page_title="😴 Sleep Disorder Prediction", layout="wide")
+st.set_page_config(page_title="😴 Sleep Disorder Prediction (GA+ANN)", layout="wide")
 st.sidebar.title("⚙ Navigation")
-page = st.sidebar.radio("Go to:", ["📂 Upload Dataset", "🚀 Train Models", "🔮 Predict Disorder", "📊 Interpretability"])
 
-# -------------------
-# FIXED LGBMWrapper CLASS
-# -------------------
-class LGBMWrapper:
-    def __init__(self, model):
-        self.model = model
+page = st.sidebar.radio("Go to:", [
+    "📂 Upload Dataset",
+    "🚀 Train Model (GA+ANN)",
+    "🔮 Predict Disorder"
+])
 
-    def fit(self, X, y):
-        return self.model.fit(X, y)
-
-    def predict(self, X):
-        return self.model.predict(X)
-
-    def predict_proba(self, X):
-        return self.model.predict_proba(X)
-
-    def __getattr__(self, attr):
-        return getattr(self.model, attr)
-
-
-# -------------------
+# ==========================================================
 # SAVE / LOAD MODEL
-# -------------------
-def save_model(best_model, scaler, label_encoders, feature_order):
-    try:
-        with open("best_model.pkl", "wb") as f:
-            pickle.dump((best_model, scaler, label_encoders, feature_order), f)
-        return True
-    except Exception as e:
-        st.error(f"Failed to save model: {e}")
-        return False
+# ==========================================================
+def save_model(best_model, scaler, encoders, order):
+    with open("best_ga_model.pkl", "wb") as f:
+        pickle.dump((best_model, scaler, encoders, order), f)
 
-
-def load_model_file():
-    if os.path.exists("best_model.pkl"):
-        try:
-            with open("best_model.pkl", "rb") as f:
-                return pickle.load(f)
-        except Exception:
-            return None, None, None, None
+def load_model():
+    if os.path.exists("best_ga_model.pkl"):
+        with open("best_ga_model.pkl", "rb") as f:
+            return pickle.load(f)
     return None, None, None, None
 
+# ==========================================================
+# GENETIC ALGORITHM FOR ANN OPTIMIZATION
+# ==========================================================
+def random_individual():
+    return {
+        "layer1": random.choice([32, 64, 128, 256]),
+        "layer2": random.choice([0, 32, 64, 128]),
+        "activation": random.choice(["relu", "tanh"]),
+        "lr": random.choice([0.0005, 0.001, 0.005]),
+        "batch": random.choice([8, 16, 32])
+    }
 
-# -------------------
-# 📂 UPLOAD DATASET
-# -------------------
+def crossover(parent1, parent2):
+    child = {}
+    for k in parent1.keys():
+        child[k] = parent1[k] if random.random() < 0.5 else parent2[k]
+    return child
+
+def mutate(ind):
+    key = random.choice(list(ind.keys()))
+    if key == "layer1":
+        ind[key] = random.choice([32, 64, 128, 256])
+    elif key == "layer2":
+        ind[key] = random.choice([0, 32, 64, 128])
+    elif key == "activation":
+        ind[key] = random.choice(["relu", "tanh"])
+    elif key == "lr":
+        ind[key] = random.choice([0.0005, 0.001, 0.005])
+    elif key == "batch":
+        ind[key] = random.choice([8, 16, 32])
+    return ind
+
+def evaluate(individual, X_train, X_test, y_train, y_test):
+    layers = tuple([x for x in [individual["layer1"], individual["layer2"]] if x != 0])
+
+    model = MLPClassifier(
+        hidden_layer_sizes=layers,
+        activation=individual["activation"],
+        learning_rate_init=individual["lr"],
+        batch_size=individual["batch"],
+        max_iter=500,
+        random_state=SEED
+    )
+
+    try:
+        model.fit(X_train, y_train)
+        preds = model.predict(X_test)
+        acc = accuracy_score(y_test, preds)
+        return acc, model
+    except:
+        return 0, None
+
+# ==========================================================
+# UPLOAD PAGE
+# ==========================================================
 if page == "📂 Upload Dataset":
     st.title("📂 Upload Sleep Dataset")
     file = st.file_uploader("Upload CSV", type=["csv"])
@@ -81,209 +103,138 @@ if page == "📂 Upload Dataset":
             df.drop("Person ID", axis=1, inplace=True)
 
         if "Blood Pressure" in df.columns:
-            try:
-                df[["Systolic_BP", "Diastolic_BP"]] = df["Blood Pressure"].str.split("/", expand=True).astype(int)
-                df.drop("Blood Pressure", axis=1, inplace=True)
-            except:
-                st.warning("⚠ Could not parse Blood Pressure properly.")
+            parts = df["Blood Pressure"].str.split("/", expand=True)
+            df["Systolic_BP"] = parts[0].astype(int)
+            df["Diastolic_BP"] = parts[1].astype(int)
+            df.drop("Blood Pressure", axis=1, inplace=True)
 
         st.session_state.df = df
-        st.success("✅ Dataset uploaded!")
-        st.dataframe(df)
+        st.success("Uploaded Successfully")
+        st.dataframe(df.head())
 
-
-# -------------------
-# 🚀 TRAIN MODELS
-# -------------------
-elif page == "🚀 Train Models":
-    st.title("🚀 Train and Compare Models")
+# ==========================================================
+# TRAIN PAGE (GA + ANN)
+# ==========================================================
+elif page == "🚀 Train Model (GA+ANN)":
+    st.title("🚀 Train ANN with Genetic Algorithm Optimization")
 
     if "df" not in st.session_state:
-        st.warning("⚠ Upload dataset first!")
+        st.warning("Upload dataset first.")
     else:
         df = st.session_state.df.copy()
 
         if "Sleep Disorder" not in df.columns:
-            st.error("⚠ Dataset must contain Sleep Disorder column")
+            st.error("Target column 'Sleep Disorder' missing.")
         else:
-            label_encoders = {}
-
+            encoders = {}
             for col in df.select_dtypes(include="object").columns:
                 le = LabelEncoder()
-                df[col] = df[col].astype(str)
-                df[col] = le.fit_transform(df[col])
-                label_encoders[col] = le
+                df[col] = le.fit_transform(df[col].astype(str))
+                encoders[col] = le
 
             X = df.drop("Sleep Disorder", axis=1)
             y = df["Sleep Disorder"]
 
-            try:
-                smt = SMOTETomek(random_state=SEED)
-                X_res, y_res = smt.fit_resample(X, y)
-            except:
-                X_res, y_res = X, y
+            # Balance classes
+            sm = SMOTETomek(random_state=SEED)
+            X, y = sm.fit_resample(X, y)
 
-            X_train, X_test, y_train, y_test = train_test_split(
-                X_res, y_res, test_size=0.2, random_state=SEED
-            )
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=SEED)
 
             scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train)
-            X_test_scaled = scaler.transform(X_test)
+            X_train = scaler.fit_transform(X_train)
+            X_test = scaler.transform(X_test)
 
-            st.info("⏳ Training models...")
+            st.info("⏳ Running Genetic Algorithm... (10 individuals × 5 generations)")
 
-            models = {
-                "SVM": SVC(C=1, kernel="rbf", probability=True),
-                "Random Forest": RandomForestClassifier(n_estimators=300),
-                "LightGBM": LGBMWrapper(LGBMClassifier(n_estimators=300)),
-                "CatBoost": CatBoostClassifier(iterations=300, verbose=0),
-                "XGBoost": XGBClassifier(eval_metric="mlogloss", use_label_encoder=False),
-                "ANN": MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=500),
-            }
+            population = [random_individual() for _ in range(10)]
+            best_score = 0
+            best_model = None
+            best_individual = None
 
-            results = {}
-            for name, model in models.items():
-                try:
-                    model.fit(X_train_scaled, y_train)
-                    preds = model.predict(X_test_scaled)
-                    results[name] = accuracy_score(y_test, preds)
-                except Exception as e:
-                    st.warning(f"{name} failed: {e}")
-                    results[name] = 0
+            progress = st.progress(0)
 
-            acc_df = pd.DataFrame(list(results.items()), columns=["Model", "Accuracy"])
-            acc_df["Accuracy"] = (acc_df["Accuracy"] * 100).round(2)
-            st.table(acc_df)
+            for gen in range(5):
+                scores = []
+                for ind in population:
+                    acc, model = evaluate(ind, X_train, X_test, y_train, y_test)
+                    scores.append((acc, ind, model))
 
-            best_name = acc_df.sort_values("Accuracy", ascending=False).iloc[0]["Model"]
-            st.success(f"🏆 Best Model: {best_name}")
+                scores.sort(reverse=True, key=lambda x: x[0])
 
-            st.session_state.best_model = models[best_name]
-            st.session_state.scaler = scaler
-            st.session_state.label_encoders = label_encoders
-            st.session_state.feature_order = list(X.columns)
+                if scores[0][0] > best_score:
+                    best_score, best_individual, best_model = scores[0]
 
-            cm = confusion_matrix(y_test, models[best_name].predict(X_test_scaled))
-            fig, ax = plt.subplots()
-            sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
-            st.pyplot(fig)
+                new_pop = [scores[0][1], scores[1][1]]  # elitism
 
-            if st.button("💾 Save Model"):
-                if save_model(models[best_name], scaler, label_encoders, list(X.columns)):
-                    st.success("✅ Model Saved!")
+                while len(new_pop) < 10:
+                    p1, p2 = random.sample(scores[:5], 2)
+                    child = crossover(p1[1], p2[1])
+                    if random.random() < 0.3:
+                        child = mutate(child)
+                    new_pop.append(child)
 
+                population = new_pop
+                progress.progress((gen + 1) / 5)
 
-# -------------------
-# 🔮 PREDICT
-# -------------------
+            st.success(f"🏆 Best GA Accuracy: {round(best_score * 100, 2)}%")
+            st.write("Best ANN Architecture:")
+            st.json(best_individual)
+
+            # Save model
+            save_model(best_model, scaler, encoders, list(X.columns))
+            st.success("Model Saved ✔")
+
+# ==========================================================
+# PREDICT PAGE
+# ==========================================================
 elif page == "🔮 Predict Disorder":
     st.title("🔮 Predict Sleep Disorder")
 
-    if "best_model" not in st.session_state:
-        loaded = load_model_file()
-        if loaded[0]:
-            st.session_state.best_model, st.session_state.scaler, st.session_state.label_encoders, st.session_state.feature_order = loaded
-            st.success("Loaded saved model!")
+    model, scaler, encoders, order = load_model()
 
-    if "best_model" not in st.session_state:
-        st.warning("⚠ Train/load a model first!")
+    if model is None:
+        st.warning("Train the model first.")
     else:
-        mode = st.radio("Mode", ["Manual Input", "Bulk"])
+        mode = st.radio("Mode:", ["Manual Input", "Upload CSV"])
 
         if mode == "Manual Input":
             inputs = {}
-
-            for feat in st.session_state.feature_order:
-                if "gender" in feat.lower():
-                    inputs[feat] = st.selectbox(feat, ["Male", "Female"])
-                elif "age" in feat.lower():
-                    inputs[feat] = st.slider(feat, 1, 100, 25)
+            for col in order:
+                if col.lower() in ["gender"]:
+                    inputs[col] = st.selectbox(col, ["Male", "Female"])
                 else:
-                    inputs[feat] = st.number_input(feat, value=0.0)
+                    inputs[col] = st.number_input(col, value=0.0)
 
             if st.button("Predict"):
                 df = pd.DataFrame([inputs])
-                for col, le in st.session_state.label_encoders.items():
-                    if col in df:
-                        df[col] = le.transform(df[col].astype(str))
 
-                df = df[st.session_state.feature_order]
-                scaled = st.session_state.scaler.transform(df)
-                pred = st.session_state.best_model.predict(scaled)[0]
+                for col, le in encoders.items():
+                    df[col] = le.transform(df[col].astype(str))
 
-                le_target = st.session_state.label_encoders.get("Sleep Disorder")
-                if le_target:
-                    pred = le_target.inverse_transform([pred])[0]
+                df = df[order]
+                scaled = scaler.transform(df)
+                pred = model.predict(scaled)[0]
 
-                st.success(f"🩺 Sleep Disorder: {pred}")
+                target_le = encoders["Sleep Disorder"]
+                label = target_le.inverse_transform([pred])[0]
+
+                st.success(f"Predicted: {label}")
 
         else:
             file = st.file_uploader("Upload CSV", type=["csv"])
             if file:
                 new_df = pd.read_csv(file)
 
-                for col, le in st.session_state.label_encoders.items():
-                    if col in new_df:
-                        new_df[col] = new_df[col].astype(str)
-                        new_df[col] = new_df[col].apply(lambda x: x if x in le.classes_ else le.classes_[0])
-                        new_df[col] = le.transform(new_df[col])
+                for col, le in encoders.items():
+                    new_df[col] = le.transform(new_df[col].astype(str))
 
-                try:
-                    new_df = new_df[st.session_state.feature_order]
-                except:
-                    st.error("Column mismatch!")
+                new_df = new_df[order]
+                scaled = scaler.transform(new_df)
+                preds = model.predict(scaled)
 
-                scaled = st.session_state.scaler.transform(new_df)
-                preds = st.session_state.best_model.predict(scaled)
+                target_le = encoders["Sleep Disorder"]
+                labels = target_le.inverse_transform(preds)
 
-                le_target = st.session_state.label_encoders.get("Sleep Disorder")
-                preds = le_target.inverse_transform(preds)
-
-                new_df["Predicted"] = preds
+                new_df["Predicted_Sleep_Disorder"] = labels
                 st.dataframe(new_df)
-
-
-# -------------------
-# 📊 INTERPRETABILITY
-# -------------------
-elif page == "📊 Interpretability":
-    st.title("📊 Model Interpretability")
-
-    if "best_model" not in st.session_state:
-        st.warning("⚠ Train model first!")
-    else:
-        df = st.session_state.df.copy()
-        label_encoders = st.session_state.label_encoders
-        feature_order = st.session_state.feature_order
-
-        for col, le in label_encoders.items():
-            if col in df:
-                df[col] = df[col].astype(str)
-                df[col] = df[col].apply(lambda x: x if x in le.classes_ else le.classes_[0])
-                df[col] = le.transform(df[col])
-
-        X = df[feature_order]
-        y = df["Sleep Disorder"]
-
-        scaler = st.session_state.scaler
-        X_scaled = scaler.transform(X)
-
-        st.info("⏳ Computing permutation importance...")
-
-        result = permutation_importance(
-            st.session_state.best_model, X_scaled, y,
-            n_repeats=10, random_state=SEED
-        )
-
-        sorted_idx = result.importances_mean.argsort()[::-1]
-
-        fig, ax = plt.subplots(figsize=(10, 6))
-        sns.barplot(
-            x=result.importances_mean[sorted_idx],
-            y=np.array(feature_order)[sorted_idx],
-            ax=ax
-        )
-        ax.set_title("Feature Importance (Permutation)")
-        st.pyplot(fig)
-
