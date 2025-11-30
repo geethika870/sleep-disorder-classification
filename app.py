@@ -1,4 +1,19 @@
 # app.py
+"""
+Single-file Streamlit app (executable)
+Features:
+- Top horizontal navigation bar (streamlit-option-menu)
+- Upload dataset (expects target column exactly "Sleep Disorder")
+- Train 3 models: ANN, ANN+GA (feature-selection), Hybrid (ANN -> XGBoost)
+- Safe preprocessing (OneHotEncoder compatibility), safe train/test split
+- Manual & Bulk prediction
+- Permutation feature importance (group OHE by original feature)
+- Save / load artifacts to disk
+- Designed to be robust to common dataset issues
+Requirements:
+pip install streamlit pandas numpy scikit-learn xgboost streamlit-option-menu imbalanced-learn matplotlib seaborn
+(Installing imbalanced-learn and xgboost is optional — app skips gracefully if missing.)
+"""
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,13 +22,21 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, LabelEncoder, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.neural_network import MLPClassifier
+from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.inspection import permutation_importance
 import matplotlib.pyplot as plt
 import seaborn as sns
+sns.set_style("whitegrid")
+random.seed(42)
+np.random.seed(42)
 
-# Optional imports (handled gracefully)
+# optional libs
+try:
+    from streamlit_option_menu import option_menu
+except Exception:
+    option_menu = None
+
 try:
     from xgboost import XGBClassifier
 except Exception:
@@ -24,628 +47,554 @@ try:
 except Exception:
     SMOTETomek = None
 
-# -----------------------
-# Settings
-# -----------------------
+# constants
 SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-MODEL_FILE = "best_artifacts.pkl"
+ARTIFACT_PATH = "artifacts.pkl"
 
 st.set_page_config(page_title="Sleep Disorder Classifier", layout="wide")
-sns.set_style("whitegrid")
 
-# -----------------------
-# CSS / UI
-# -----------------------
-st.markdown("""
-<style>
-body { background-color: #f7fbff; }
-.header { font-size: 34px; color: #0b3d91; font-weight:700; }
-.card { border-radius:10px; padding:12px; background: #ffffff; border:1px solid #e6eefb; }
-.small { color:#6c757d; font-size:13px; }
-</style>
-""", unsafe_allow_html=True)
-
-# -----------------------
-# Helpers: OneHotEncoder compatibility
-# -----------------------
-def make_onehotencoder():
-    from sklearn.preprocessing import OneHotEncoder
+# ---------------------------
+# helper: compatible OneHotEncoder
+# ---------------------------
+def make_onehot():
     try:
-        # scikit-learn >= 1.2 uses sparse_output
         return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
     except TypeError:
-        # older versions use sparse
         return OneHotEncoder(handle_unknown="ignore", sparse=False)
 
-# -----------------------
-# Safe train_test_split helper
-# -----------------------
-def safe_train_test_split(X, y, test_size=0.25, random_state=SEED):
-    # y expected as pandas Series or 1d array
-    try:
-        y_series = pd.Series(y)
-        unique_counts = y_series.value_counts()
-        if len(unique_counts) < 2:
-            st.warning("⚠ Target has only one class — stratified split is disabled.")
-            return train_test_split(X, y, test_size=test_size, random_state=random_state)
-        if any(unique_counts < 3):
-            st.warning("⚠ Some classes have < 3 samples — stratified split disabled to avoid error.")
-            return train_test_split(X, y, test_size=test_size, random_state=random_state)
-        return train_test_split(X, y, test_size=test_size, stratify=y, random_state=random_state)
-    except Exception:
+# ---------------------------
+# helper: safe train_test_split
+# ---------------------------
+def safe_split(X, y, test_size=0.25, random_state=SEED):
+    y_ser = pd.Series(y)
+    if y_ser.nunique() < 2:
+        st.warning("Target has only one class — stratified split disabled.")
         return train_test_split(X, y, test_size=test_size, random_state=random_state)
+    counts = y_ser.value_counts()
+    if any(counts < 3):
+        st.warning("Some classes have <3 samples — stratified split disabled to avoid error.")
+        return train_test_split(X, y, test_size=test_size, random_state=random_state)
+    return train_test_split(X, y, test_size=test_size, stratify=y, random_state=random_state)
 
-# -----------------------
-# Preprocessing: build and transform
-# -----------------------
-def build_preprocessor(df, target_col="Sleep Disorder"):
-    # drop target if present in features
-    cols = df.columns.tolist()
-    if target_col not in cols:
-        target_col = df.columns[-1]
+# ---------------------------
+# Preprocessing helpers
+# ---------------------------
+def build_preprocessor_from_df(df, target_col="Sleep Disorder"):
+    # decide numeric & categorical
     X = df.drop(columns=[target_col])
-    # numeric and categorical detection
     num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
     cat_cols = X.select_dtypes(include=["object", "category"]).columns.tolist()
-    # remove target if somehow present
-    if target_col in num_cols:
-        num_cols.remove(target_col)
-    if target_col in cat_cols:
-        cat_cols.remove(target_col)
-
-    num_pipe = Pipeline([("scaler", StandardScaler())])
-    cat_pipe = Pipeline([("ohe", make_onehotencoder())])
-
+    # remove target if mistakenly included
+    if target_col in num_cols: num_cols.remove(target_col)
+    if target_col in cat_cols: cat_cols.remove(target_col)
     transformers = []
     if len(num_cols) > 0:
-        transformers.append(("num", num_pipe, num_cols))
+        transformers.append(("num", Pipeline([("scaler", StandardScaler())]), num_cols))
     if len(cat_cols) > 0:
-        transformers.append(("cat", cat_pipe, cat_cols))
-
+        transformers.append(("cat", Pipeline([("ohe", make_onehot())]), cat_cols))
     if len(transformers) == 0:
-        # no features? create trivial passthrough
-        preproc = ColumnTransformer([("none", "passthrough", X.columns.tolist())])
+        ct = ColumnTransformer([("none", "passthrough", X.columns.tolist())])
     else:
-        preproc = ColumnTransformer(transformers, remainder="drop")
-    return preproc, num_cols, cat_cols
+        ct = ColumnTransformer(transformers, remainder="drop")
+    return ct, num_cols, cat_cols
 
 def fit_preprocessor(df, target_col="Sleep Disorder"):
-    preproc, num_cols, cat_cols = build_preprocessor(df, target_col)
+    ct, num_cols, cat_cols = build_preprocessor_from_df(df, target_col)
     X = df.drop(columns=[target_col])
-    # ensure numeric columns are numeric
+    # coerce numeric columns
     for c in num_cols:
         X[c] = pd.to_numeric(X[c], errors="coerce").fillna(X[c].median())
     for c in cat_cols:
         X[c] = X[c].astype(str).fillna("NA")
-    preproc.fit(X)
-    return preproc, num_cols, cat_cols
+    ct.fit(X[num_cols + cat_cols if len(cat_cols)>0 else num_cols])
+    return ct, num_cols, cat_cols
 
-def transform_with_preproc(df_new, preproc, num_cols, cat_cols):
-    # ensure columns exist
-    df_new = df_new.copy()
+def transform_df(df_new, preproc, num_cols, cat_cols):
+    # ensure columns present
+    df = df_new.copy()
     for c in num_cols:
-        if c not in df_new.columns:
-            df_new[c] = 0
+        if c not in df.columns:
+            df[c] = 0
     for c in cat_cols:
-        if c not in df_new.columns:
-            df_new[c] = "NA"
-    # coerce numeric columns
+        if c not in df.columns:
+            df[c] = "NA"
+    # coerce types
     for c in num_cols:
-        df_new[c] = pd.to_numeric(df_new[c], errors="coerce").fillna(df_new[c].median())
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(df[c].median())
     for c in cat_cols:
-        df_new[c] = df_new[c].astype(str).fillna("NA")
-    Xp = preproc.transform(df_new[num_cols + cat_cols if len(cat_cols)>0 else num_cols])
-    return Xp
+        df[c] = df[c].astype(str).fillna("NA")
+    cols = num_cols + (cat_cols if len(cat_cols)>0 else [])
+    return preproc.transform(df[cols])
 
-# -----------------------
-# GA tuner (lightweight) — tunes feature selection (fast)
-# -----------------------
-def ga_feature_selector(X_train, y_train, generations=4, pop_size=8, timeout_seconds=60):
+# ---------------------------
+# GA feature selection (fixed; returns selected indices)
+# ---------------------------
+def ga_feature_selection(X, y, generations=6, pop_size=10, mutation_rate=0.15, timeout=45):
     """
-    Lightweight GA to produce a boolean mask of selected features.
-    This is fast and simple: populations are random masks; we keep best masks by accuracy on a small CV split.
-    Returns an index list of selected features.
+    Lightweight GA that evolves binary masks selecting features.
+    Returns list of selected column indices.
     """
     rng = np.random.RandomState(SEED)
-    n_features = X_train.shape[1]
-    # train/val split (2-way)
-    try:
-        Xt, Xv, yt, yv = train_test_split(X_train, y_train, test_size=0.25, random_state=SEED, stratify=y_train if len(np.unique(y_train))>1 else None)
-    except Exception:
-        Xt, Xv, yt, yv = train_test_split(X_train, y_train, test_size=0.25, random_state=SEED)
-
-    def random_mask():
-        # ensure at least 2 features
-        mask = rng.choice([0,1], size=n_features, p=[0.45,0.55])
+    n_feat = X.shape[1]
+    if n_feat <= 2:
+        return list(range(n_feat))
+    # initialize population (binary masks)
+    population = rng.randint(0,2,size=(pop_size,n_feat))
+    # ensure minimum features selected
+    for i in range(pop_size):
+        if population[i].sum() < 2:
+            idx = rng.choice(n_feat, 2, replace=False)
+            population[i, idx] = 1
+    start = time.time()
+    def fitness(mask):
         if mask.sum() < 2:
-            idx = rng.choice(n_features, 2, replace=False)
-            mask[idx] = 1
-        return mask
-
-    def score_mask(mask):
+            return 0.0
+        sel = np.where(mask==1)[0]
         try:
-            sel = np.where(mask == 1)[0]
-            if len(sel) == 0:
-                return 0.0
-            clf = MLPClassifier(hidden_layer_sizes=(64,32), max_iter=250, random_state=SEED)
-            clf.fit(Xt[:, sel], yt)
-            preds = clf.predict(Xv[:, sel])
-            return accuracy_score(yv, preds)
+            Xt, Xv, yt, yv = train_test_split(X[:, sel], y, test_size=0.25, random_state=SEED)
+        except Exception:
+            Xt, Xv, yt, yv = train_test_split(X[:, sel], y, test_size=0.25)
+        try:
+            clf = MLPClassifier(hidden_layer_sizes=(64,32), max_iter=200, random_state=SEED)
+            clf.fit(Xt, yt)
+            p = clf.predict(Xv)
+            return accuracy_score(yv, p)
         except Exception:
             return 0.0
-
-    # initial population
-    population = [random_mask() for _ in range(pop_size)]
     best_mask = None
     best_score = -1.0
-    t0 = time.time()
     for gen in range(generations):
-        scored = []
-        for mask in population:
-            s = score_mask(mask)
-            scored.append((s, mask))
-            if time.time() - t0 > timeout_seconds:
-                break
-        scored.sort(key=lambda x: x[0], reverse=True)
-        if scored and scored[0][0] > best_score:
-            best_score, best_mask = scored[0][0], scored[0][1]
-        # selection: keep top half
-        keep = [m for (_, m) in scored[: max(2, pop_size//2)]]
+        scores = np.array([fitness(m) for m in population])
+        order = scores.argsort()[::-1]
+        # keep top 40%
+        keep_n = max(2, int(pop_size*0.4))
+        parents = population[order[:keep_n]]
+        # track best
+        if scores.max() > best_score:
+            best_score = scores.max()
+            best_mask = population[scores.argmax()].copy()
         # breed
-        new_pop = keep.copy()
+        new_pop = parents.tolist()
         while len(new_pop) < pop_size:
-            a, b = rng.choice(keep, 2, replace=False)
-            # crossover
-            cross_pt = rng.randint(1, n_features-1)
-            child = np.concatenate([a[:cross_pt], b[cross_pt:]])
+            a,b = parents[rng.randint(0,len(parents))], parents[rng.randint(0,len(parents))]
+            # single-point crossover
+            pt = rng.randint(1, n_feat-1)
+            child = np.concatenate([a[:pt], b[pt:]])
             # mutation
-            if rng.rand() < 0.2:
-                i = rng.randint(0, n_features)
-                child[i] = 1 - child[i]
-            # ensure at least 2 features
+            if rng.rand() < mutation_rate:
+                m_idx = rng.randint(0, n_feat)
+                child[m_idx] = 1 - child[m_idx]
+            # ensure >=2 features
             if child.sum() < 2:
-                idx = rng.choice(n_features, 2, replace=False)
-                child[idx] = 1
+                idxs = rng.choice(n_feat, 2, replace=False)
+                child[idxs] = 1
             new_pop.append(child)
-        population = new_pop
-        if time.time() - t0 > timeout_seconds:
+        population = np.array(new_pop)
+        if time.time() - start > timeout:
             break
     if best_mask is None:
-        best_mask = random_mask()
-    sel_idx = np.where(best_mask == 1)[0]
-    return sel_idx.tolist()
+        best_mask = population[0]
+    selected = np.where(best_mask==1)[0].tolist()
+    return selected
 
-# -----------------------
-# Train three models
-# -----------------------
-def train_ann_model(X_train, y_train, X_test, y_test):
+# ---------------------------
+# model training functions
+# ---------------------------
+def train_ann(X_train, y_train, X_test, y_test):
     ann = MLPClassifier(hidden_layer_sizes=(128,64), max_iter=400, random_state=SEED)
     ann.fit(X_train, y_train)
-    preds = ann.predict(X_test)
-    return accuracy_score(y_test, preds), ann
+    p = ann.predict(X_test)
+    return accuracy_score(y_test, p), ann
 
-def train_ann_ga_model(X_train, y_train, X_test, y_test):
-    # feature selection via GA
-    sel_idx = ga_feature_selector(X_train, y_train, generations=4, pop_size=8, timeout_seconds=60)
-    if len(sel_idx) == 0:
-        sel_idx = list(range(min(2, X_train.shape[1])))
-    Xtr = X_train[:, sel_idx]
-    Xte = X_test[:, sel_idx]
-    ann = MLPClassifier(hidden_layer_sizes=(96,48), max_iter=500, random_state=SEED)
+def train_ann_ga(X_train, y_train, X_test, y_test):
+    sel = ga_feature_selection(X_train, y_train, generations=6, pop_size=10, timeout=45)
+    if len(sel) == 0:
+        sel = list(range(min(2, X_train.shape[1])))
+    Xtr, Xte = X_train[:, sel], X_test[:, sel]
+    ann = MLPClassifier(hidden_layer_sizes=(96,48), max_iter=400, random_state=SEED)
     ann.fit(Xtr, y_train)
-    preds = ann.predict(Xte)
-    return accuracy_score(y_test, preds), ann, sel_idx
+    p = ann.predict(Xte)
+    return accuracy_score(y_test, p), ann, sel
 
-def train_hybrid_model(X_train, y_train, X_test, y_test):
+def train_hybrid(X_train, y_train, X_test, y_test):
     if XGBClassifier is None:
-        raise RuntimeError("xgboost not installed. Hybrid model unavailable.")
-    # Stage 1: ANN to produce probs
+        raise RuntimeError("xgboost not installed")
     ann = MLPClassifier(hidden_layer_sizes=(64,), max_iter=400, random_state=SEED)
     ann.fit(X_train, y_train)
-    train_proba = ann.predict_proba(X_train)
-    test_proba = ann.predict_proba(X_test)
-    # Stage 2: XGBoost on ANN probabilities
+    # use ann probabilities as features
+    tr_proba = ann.predict_proba(X_train)
+    te_proba = ann.predict_proba(X_test)
     xgb = XGBClassifier(n_estimators=200, learning_rate=0.05, max_depth=5, use_label_encoder=False, eval_metric="mlogloss", random_state=SEED)
-    xgb.fit(train_proba, y_train)
-    preds = xgb.predict(test_proba)
-    return accuracy_score(y_test, preds), ann, xgb
+    xgb.fit(tr_proba, y_train)
+    p = xgb.predict(te_proba)
+    return accuracy_score(y_test, p), ann, xgb
 
-# -----------------------
+# ---------------------------
 # Save / Load artifacts
-# -----------------------
-def save_artifacts(path=MODEL_FILE, artifacts=None):
+# ---------------------------
+def save_artifacts(path, obj):
     try:
         with open(path, "wb") as f:
-            pickle.dump(artifacts, f)
+            pickle.dump(obj, f)
         return True
     except Exception as e:
-        st.error(f"Failed to save artifacts: {e}")
+        st.error(f"Save failed: {e}")
         return False
 
-def load_artifacts(path=MODEL_FILE):
+def load_artifacts(path):
     if os.path.exists(path):
         try:
             with open(path, "rb") as f:
                 return pickle.load(f)
         except Exception as e:
-            st.error(f"Failed to load artifacts: {e}")
+            st.error(f"Load failed: {e}")
             return None
     return None
 
-# -----------------------
-# UI & Navigation (single page with sections)
-# -----------------------
-st.markdown('<div class="header">Sleep Disorder Classification (single-file app)</div>', unsafe_allow_html=True)
-st.write("A streamlined app that trains three models (ANN, ANN+GA, Hybrid ANN→XGBoost), compares them, allows predictions and shows feature importance. Target column name must be **Sleep Disorder**.")
-
-st.markdown("---")
-
-# Section: Upload dataset
-st.markdown("### 1) Upload dataset")
-uploaded = st.file_uploader("Upload CSV (features + target). Target must be named exactly: 'Sleep Disorder'", type=["csv"])
-if uploaded is not None:
-    try:
-        df = pd.read_csv(uploaded)
-    except Exception as e:
-        st.error(f"Could not read CSV: {e}")
-        df = None
-    if df is not None:
-        # if Blood Pressure present, split convenience
-        if "Blood Pressure" in df.columns:
-            try:
-                bp = df["Blood Pressure"].astype(str).str.split("/", expand=True)
-                if bp.shape[1] >= 2:
-                    df["Systolic_BP"] = pd.to_numeric(bp[0], errors="coerce")
-                    df["Diastolic_BP"] = pd.to_numeric(bp[1], errors="coerce")
-                    df.drop(columns=["Blood Pressure"], inplace=True)
-            except Exception:
-                pass
-        st.session_state["df"] = df
-        st.success("Dataset uploaded into session.")
-        st.dataframe(df.head(6))
-
-# load df from session if present
-df = st.session_state.get("df", None)
-
-st.markdown("---")
-
-# Section: Train & compare
-st.markdown("### 2) Train & Compare Models")
-if df is None:
-    st.info("Upload a dataset above to enable training.")
+# ---------------------------
+# Top nav (horizontal) using streamlit-option-menu if available
+# ---------------------------
+if option_menu is not None:
+    selected = option_menu(
+        menu_title=None,
+        options=["Home", "Upload", "Train", "Predict Manual", "Predict Bulk", "Interpret"],
+        icons=["house", "cloud-upload", "cpu", "person-lines-fill", "file-earmark-spreadsheet", "bar-chart"],
+        orientation="horizontal",
+        default_index=0,
+        styles={
+            "container": {"padding": "0px", "background-color": "#f0f8ff"},
+            "icon": {"color": "#0b5ed7", "font-size": "18px"},
+            "nav-link": {"font-size": "16px", "text-align": "left", "margin":"0px 8px"},
+            "nav-link-selected": {"background-color": "#0b5ed7", "color": "white"},
+        }
+    )
 else:
-    # check target presence
-    if "Sleep Disorder" not in df.columns:
-        st.error("Target column 'Sleep Disorder' not found. Make sure your CSV has this exact column name.")
-    else:
-        col_count = df.shape[1] - 1
-        st.write(f"Dataset shape: {df.shape[0]} rows × {df.shape[1]} columns (features: {col_count})")
+    # fallback to sidebar radio
+    st.sidebar.warning("Install streamlit-option-menu for top navbar: pip install streamlit-option-menu")
+    selected = st.sidebar.radio("Navigation", ["Home", "Upload", "Train", "Predict Manual", "Predict Bulk", "Interpret"])
 
-        # Fit preprocessor
-        if st.button("Fit Preprocessor & Preview"):
-            with st.spinner("Fitting preprocessor..."):
-                preproc, num_cols, cat_cols = fit_preprocessor(df, "Sleep Disorder")
-                st.session_state["preproc"] = preproc
-                st.session_state["num_cols"] = num_cols
-                st.session_state["cat_cols"] = cat_cols
-                st.success("Preprocessor fitted and stored in session.")
-                st.write("Numeric cols:", num_cols)
-                st.write("Categorical cols:", cat_cols)
+# ---------------------------
+# Page: Home
+# ---------------------------
+if selected == "Home":
+    st.title("😴 Sleep Disorder Classification")
+    st.markdown(
+        """
+        #### Why sleep matters
+        - Sleep is essential for memory, mood, immune function and metabolic health.
+        - Common sleep disorders: *Insomnia, Sleep Apnea, Narcolepsy, Restless Leg Syndrome*.
+        - Early detection improves outcomes.
 
-        # Train models button
-        if st.button("Train the 3 models (ANN, ANN+GA, Hybrid)"):
-            if "preproc" not in st.session_state:
-                st.warning("Fit the preprocessor first (click 'Fit Preprocessor & Preview').")
-            else:
-                preproc = st.session_state["preproc"]
-                num_cols = st.session_state.get("num_cols", [])
-                cat_cols = st.session_state.get("cat_cols", [])
+        Use the navigation bar to upload your dataset, train models, make predictions, and inspect feature importance.
+        """
+    )
+    st.info("Target column must be named exactly: **Sleep Disorder**")
 
-                # Prepare X,y
-                X_raw = df.drop(columns=["Sleep Disorder"])
-                y_raw = df["Sleep Disorder"]
-                # label-encode target
-                target_le = LabelEncoder()
-                y_enc = target_le.fit_transform(y_raw.astype(str))
-                st.session_state["target_le"] = target_le
-
-                # transform features
-                # ensure numeric/categorical columns exist for transform function
-                for c in num_cols:
-                    X_raw[c] = pd.to_numeric(X_raw[c], errors="coerce").fillna(X_raw[c].median())
-                for c in cat_cols:
-                    X_raw[c] = X_raw[c].astype(str).fillna("NA")
-                X_proc = preproc.transform(X_raw[num_cols + cat_cols if len(cat_cols)>0 else num_cols])
-
-                # optional balancing
-                use_smt = st.checkbox("Apply SMOTETomek balancing if available", value=False)
-                if use_smt and SMOTETomek is not None:
-                    try:
-                        smt = SMOTETomek(random_state=SEED)
-                        X_bal, y_bal = smt.fit_resample(X_proc, y_enc)
-                        st.write("SMOTETomek applied. New shape:", X_bal.shape)
-                    except Exception as e:
-                        st.warning("SMOTETomek failed; using original data.")
-                        X_bal, y_bal = X_proc, y_enc
-                else:
-                    X_bal, y_bal = X_proc, y_enc
-
-                # safe split
-                X_train, X_test, y_train, y_test = safe_train_test_split(pd.DataFrame(X_bal), pd.Series(y_bal), test_size=0.25, random_state=SEED)
-                # convert to numpy arrays
-                X_train = np.asarray(X_train)
-                X_test = np.asarray(X_test)
-                y_train = np.asarray(y_train)
-                y_test = np.asarray(y_test)
-
-                st.info("Training ANN (baseline)...")
-                t0 = time.time()
+# ---------------------------
+# Page: Upload
+# ---------------------------
+elif selected == "Upload":
+    st.header("Upload dataset (CSV)")
+    uploaded = st.file_uploader("Upload CSV (features + target 'Sleep Disorder')", type=["csv"])
+    if uploaded is not None:
+        try:
+            df = pd.read_csv(uploaded)
+            # convenience blood pressure parsing
+            if "Blood Pressure" in df.columns:
                 try:
-                    acc_ann, ann_model = train_ann_model(X_train, y_train, X_test, y_test)
-                except Exception as e:
-                    st.error(f"ANN training failed: {e}")
-                    acc_ann, ann_model = 0.0, None
-
-                st.info("Training ANN + GA (lightweight feature selection)...")
-                try:
-                    acc_ga, ann_ga_model, selected_idx = train_ann_ga_model(X_train, y_train, X_test, y_test)
-                except Exception as e:
-                    st.error(f"ANN+GA training failed: {e}")
-                    acc_ga, ann_ga_model, selected_idx = 0.0, None, []
-
-                st.info("Training Hybrid ANN -> XGBoost...")
-                if XGBClassifier is None:
-                    st.warning("xgboost not installed — hybrid skipped.")
-                    acc_hybrid, ann_hybrid, xgb_hybrid = 0.0, None, None
-                else:
-                    try:
-                        acc_hybrid, ann_hybrid, xgb_hybrid = train_hybrid_model(X_train, y_train, X_test, y_test)
-                    except Exception as e:
-                        st.error(f"Hybrid training failed: {e}")
-                        acc_hybrid, ann_hybrid, xgb_hybrid = 0.0, None, None
-
-                t_elapsed = time.time() - t0
-
-                # show comparisons
-                st.markdown("#### Model accuracies")
-                st.write(f"ANN (baseline): **{acc_ann*100:.2f}%**")
-                st.write(f"ANN + GA: **{acc_ga*100:.2f}%**")
-                st.write(f"Hybrid ANN→XGBoost: **{acc_hybrid*100:.2f}%**")
-                best_acc = max(acc_ann, acc_ga, acc_hybrid)
-                if best_acc == acc_ann:
-                    best_name = "ANN"
-                    best_model_obj = ann_model
-                elif best_acc == acc_ga:
-                    best_name = "ANN+GA"
-                    best_model_obj = ann_ga_model
-                else:
-                    best_name = "Hybrid ANN->XGBoost"
-                    best_model_obj = {"ann": ann_hybrid, "xgb": xgb_hybrid} if xgb_hybrid is not None else None
-
-                st.success(f"Training finished in {t_elapsed:.1f}s — Best: {best_name} ({best_acc*100:.2f}%)")
-
-                # store artifacts
-                artifacts = {
-                    "preproc": preproc,
-                    "num_cols": num_cols,
-                    "cat_cols": cat_cols,
-                    "target_le": target_le,
-                    "best_name": best_name,
-                    "best_model": best_model_obj,
-                    "ann_model": ann_model,
-                    "ann_ga_model": ann_ga_model,
-                    "ann_ga_selected_idx": selected_idx,
-                    "hybrid_ann": ann_hybrid,
-                    "hybrid_xgb": xgb_hybrid
-                }
-                ok = save_artifacts(MODEL_FILE, artifacts)
-                st.write("Saved artifacts:", ok)
-                # store in session
-                st.session_state["artifacts"] = artifacts
-
-                # confusion matrix for best if possible
-                try:
-                    if best_name == "Hybrid ANN->XGBoost" and xgb_hybrid is not None:
-                        ypred = xgb_hybrid.predict(ann_hybrid.predict_proba(X_test))
-                    elif best_name == "ANN+GA" and ann_ga_model is not None and len(selected_idx)>0:
-                        ypred = ann_ga_model.predict(X_test[:, selected_idx])
-                    elif best_name == "ANN" and ann_model is not None:
-                        ypred = ann_model.predict(X_test)
-                    else:
-                        ypred = None
-                    if ypred is not None:
-                        cm = confusion_matrix(y_test, ypred)
-                        fig, ax = plt.subplots()
-                        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax)
-                        ax.set_xlabel("Predicted")
-                        ax.set_ylabel("Actual")
-                        st.pyplot(fig)
+                    bp = df["Blood Pressure"].astype(str).str.split("/", expand=True)
+                    if bp.shape[1] >= 2:
+                        df["Systolic_BP"] = pd.to_numeric(bp[0], errors="coerce")
+                        df["Diastolic_BP"] = pd.to_numeric(bp[1], errors="coerce")
+                        df.drop(columns=["Blood Pressure"], inplace=True)
                 except Exception:
                     pass
-
-st.markdown("---")
-
-# Section: Prediction (Manual)
-st.markdown("### 3) Manual Prediction (single sample)")
-art = st.session_state.get("artifacts", None) or load_artifacts(MODEL_FILE)
-if art is None:
-    st.info("Train models and save artifacts first (use section 2).")
-else:
-    preproc = art["preproc"]
-    num_cols = art["num_cols"]
-    cat_cols = art["cat_cols"]
-    target_le = art["target_le"]
-    best_name = art["best_name"]
-    best_model = art["best_model"]
-
-    # Build inputs for features
-    df_template = st.session_state.get("df")
-    if df_template is not None:
-        feat_cols = [c for c in df_template.columns if c != "Sleep Disorder"]
-        st.write("Enter values for each feature (leave blank to use median/mode defaults):")
-        inputs = {}
-        cols_ui = st.columns(2)
-        for i, c in enumerate(feat_cols):
-            if c in num_cols:
-                default = float(df_template[c].median()) if pd.api.types.is_numeric_dtype(df_template[c]) else 0.0
-                inputs[c] = cols_ui[i%2].number_input(c, value=default)
-            else:
-                default = str(df_template[c].mode().iloc[0]) if c in df_template.columns and not df_template[c].mode().empty else "NA"
-                inputs[c] = cols_ui[i%2].text_input(c, value=default)
-
-        if st.button("Run manual prediction"):
-            sample = pd.DataFrame([inputs])
-            try:
-                Xs = transform_with_preproc(sample, preproc, num_cols, cat_cols)
-                if best_name == "Hybrid ANN->XGBoost":
-                    ann_m = art.get("hybrid_ann")
-                    xgb_m = art.get("hybrid_xgb")
-                    if ann_m is None or xgb_m is None:
-                        st.error("Hybrid models not available.")
-                    else:
-                        pred = xgb_m.predict(ann_m.predict_proba(Xs))[0]
-                elif best_name == "ANN+GA":
-                    ann_ga = art.get("ann_ga_model")
-                    sel_idx = art.get("ann_ga_selected_idx", [])
-                    if ann_ga is None or len(sel_idx) == 0:
-                        st.error("ANN+GA model not available.")
-                    else:
-                        pred = ann_ga.predict(Xs[:, sel_idx])[0]
-                else:
-                    annm = art.get("ann_model")
-                    if annm is None:
-                        st.error("ANN model not available.")
-                    else:
-                        pred = annm.predict(Xs)[0]
-
-                # decode label
-                if target_le is not None:
-                    pred_label = target_le.inverse_transform([int(pred)])[0]
-                else:
-                    pred_label = pred
-                st.success(f"Predicted Sleep Disorder: {pred_label}")
-            except Exception as e:
-                st.error(f"Prediction failed: {e}")
-
-st.markdown("---")
-
-# Section: Prediction (Bulk)
-st.markdown("### 4) Bulk Prediction (CSV)")
-if art is None:
-    st.info("Train and save artifacts first.")
-else:
-    upload_pred = st.file_uploader("Upload CSV for bulk prediction (features only or same columns)", type=["csv"], key="bulk_pred")
-    if upload_pred is not None:
-        try:
-            newdf = pd.read_csv(upload_pred)
-            # drop target if present
-            if "Sleep Disorder" in newdf.columns:
-                newdf = newdf.drop(columns=["Sleep Disorder"])
-            # transform
-            Xnew = transform_with_preproc(newdf, preproc, num_cols, cat_cols)
-            # predict using best
-            if best_name == "Hybrid ANN->XGBoost":
-                ann_m = art.get("hybrid_ann")
-                xgb_m = art.get("hybrid_xgb")
-                preds = xgb_m.predict(ann_m.predict_proba(Xnew))
-            elif best_name == "ANN+GA":
-                ann_ga = art.get("ann_ga_model")
-                sel_idx = art.get("ann_ga_selected_idx", [])
-                preds = ann_ga.predict(Xnew[:, sel_idx]) if ann_ga is not None and len(sel_idx)>0 else np.array([None]*len(Xnew))
-            else:
-                annm = art.get("ann_model")
-                preds = annm.predict(Xnew) if annm is not None else np.array([None]*len(Xnew))
-
-            if target_le is not None:
-                try:
-                    labels = target_le.inverse_transform(preds.astype(int))
-                except Exception:
-                    labels = preds
-            else:
-                labels = preds
-            out = newdf.copy()
-            out["Predicted_Sleep_Disorder"] = labels
-            st.dataframe(out.head(50))
-            csv_bytes = out.to_csv(index=False).encode("utf-8")
-            st.download_button("Download predictions CSV", csv_bytes, "predictions.csv", "text/csv")
+            st.session_state["df"] = df
+            st.success("Dataset uploaded into session.")
+            st.dataframe(df.head(6))
         except Exception as e:
-            st.error(f"Bulk prediction failed: {e}")
+            st.error(f"Could not read CSV: {e}")
+    else:
+        if "df" in st.session_state and st.session_state["df"] is not None:
+            st.write("Dataset already loaded in session:")
+            st.dataframe(st.session_state["df"].head(6))
 
-st.markdown("---")
-
-# Section: Interpretability
-st.markdown("### 5) Interpretability — Permutation Feature Importance (grouped by original features)")
-if art is None:
-    st.info("Train and save artifacts first.")
-else:
-    try:
-        # Prepare dataset for importance (use original df)
-        df_full = st.session_state.get("df")
-        if df_full is None:
-            st.warning("Dataset not available in session.")
+# ---------------------------
+# Page: Train
+# ---------------------------
+elif selected == "Train":
+    st.header("Train & Compare Models")
+    df = st.session_state.get("df", None)
+    if df is None:
+        st.warning("Upload dataset first.")
+    else:
+        if "Sleep Disorder" not in df.columns:
+            st.error("Target column 'Sleep Disorder' not found in dataset.")
         else:
-            Xraw = df_full.drop(columns=["Sleep Disorder"])
-            yraw = df_full["Sleep Disorder"]
-            # transform all
-            Xproc_all = transform_with_preproc(Xraw, preproc, num_cols, cat_cols)
-            # prepare estimator wrapper depending on best model
-            if art["best_name"] == "Hybrid ANN->XGBoost" and art.get("hybrid_ann") is not None and art.get("hybrid_xgb") is not None:
-                class HybridWrapper:
-                    def __init__(self, ann_model, xgb_model):
-                        self.ann = ann_model
-                        self.xgb = xgb_model
-                    def predict(self, Xp):
-                        return self.xgb.predict(self.ann.predict_proba(Xp))
-                estimator = HybridWrapper(art["hybrid_ann"], art["hybrid_xgb"])
-            elif art["best_name"] == "ANN+GA" and art.get("ann_ga_model") is not None:
-                estimator = art["ann_ga_model"]
-            else:
-                estimator = art.get("ann_model") or art.get("ann_ga_model") or None
+            st.write("Dataset shape:", df.shape)
+            if st.button("Fit Preprocessor"):
+                with st.spinner("Fitting preprocessor..."):
+                    preproc, num_cols, cat_cols = fit_preprocessor(df, "Sleep Disorder")
+                    st.session_state["preproc"] = preproc
+                    st.session_state["num_cols"] = num_cols
+                    st.session_state["cat_cols"] = cat_cols
+                    st.success("Preprocessor fitted. Numeric cols: %s | Categorical cols: %s" % (num_cols, cat_cols))
 
-            if estimator is None:
-                st.warning("No estimator available for permutation importance.")
-            else:
-                # encode target if needed
-                y_enc = yraw
-                if art.get("target_le") is not None:
-                    y_enc = art["target_le"].transform(yraw.astype(str))
-                st.info("Computing permutation importance (this may take a few seconds)...")
-                res = permutation_importance(estimator, Xproc_all, y_enc, n_repeats=8, random_state=SEED, n_jobs=1)
-                importances = res.importances_mean
-                # reconstruct processed column names (num + cat__val)
-                proc_names = []
-                if len(num_cols) > 0:
-                    proc_names.extend(num_cols)
-                if len(cat_cols) > 0:
-                    ohe = preproc.named_transformers_.get("cat")
-                    if ohe is None:
-                        # When cat transformer is inside ColumnTransformer, retrieve it differently
+            if "preproc" in st.session_state:
+                preproc = st.session_state["preproc"]
+                num_cols = st.session_state["num_cols"]
+                cat_cols = st.session_state["cat_cols"]
+
+                if st.button("Train 3 Models (ANN, ANN+GA, Hybrid)"):
+                    with st.spinner("Training — this may take some time depending on dataset and xgboost availability..."):
+                        # build X,y processed
+                        Xraw = df.drop(columns=["Sleep Disorder"])
+                        yraw = df["Sleep Disorder"]
+                        # encode target
+                        le_target = LabelEncoder()
+                        y_enc = le_target.fit_transform(yraw.astype(str))
+                        st.session_state["target_le"] = le_target
+
+                        # ensure numeric/cat presence
+                        for c in num_cols:
+                            if c not in Xraw.columns:
+                                Xraw[c] = 0
+                            Xraw[c] = pd.to_numeric(Xraw[c], errors="coerce").fillna(Xraw[c].median())
+                        for c in cat_cols:
+                            if c not in Xraw.columns:
+                                Xraw[c] = "NA"
+                            Xraw[c] = Xraw[c].astype(str).fillna("NA")
+
+                        Xproc = preproc.transform(Xraw[num_cols + cat_cols if len(cat_cols)>0 else num_cols])
+
+                        # optional balancing
+                        use_smt = st.checkbox("Apply SMOTETomek balancing (if installed)", value=False)
+                        if use_smt and SMOTETomek is not None:
+                            try:
+                                smt = SMOTETomek(random_state=SEED)
+                                Xbal, ybal = smt.fit_resample(Xproc, y_enc)
+                                st.write("SMOTETomek applied. New shape:", Xbal.shape)
+                            except Exception as e:
+                                st.warning("SMOTETomek failed: " + str(e))
+                                Xbal, ybal = Xproc, y_enc
+                        else:
+                            Xbal, ybal = Xproc, y_enc
+
+                        # safe split
+                        X_train, X_test, y_train, y_test = safe_split(pd.DataFrame(Xbal), pd.Series(ybal), test_size=0.25)
+                        X_train = np.asarray(X_train); X_test = np.asarray(X_test)
+                        y_train = np.asarray(y_train); y_test = np.asarray(y_test)
+
+                        # train ANN
                         try:
-                            ct = preproc
-                            # find categories stored in the OneHotEncoder
-                            ohe_obj = None
-                            for name, trans, cols in ct.transformers_:
-                                if name == "cat":
-                                    ohe_obj = trans.named_steps["ohe"]
-                                    cat_list = cols
-                                    break
-                            if ohe_obj is not None:
-                                for i, col in enumerate(cat_cols):
-                                    cats = ohe_obj.categories_[i]
-                                    proc_names.extend([f"{col}__{v}" for v in cats])
-                        except Exception:
-                            # fallback: name columns generically
-                            proc_names.extend([f"cat_{i}" for i in range(len(importances)-len(num_cols))])
+                            acc_ann, ann_model = train_ann(X_train, y_train, X_test, y_test)
+                        except Exception as e:
+                            st.error("ANN failed: " + str(e)); acc_ann, ann_model = 0.0, None
+
+                        # train ANN+GA
+                        try:
+                            acc_ga, ann_ga, sel_idx = train_ann_ga(X_train, y_train, X_test, y_test)
+                        except Exception as e:
+                            st.error("ANN+GA failed: " + str(e)); acc_ga, ann_ga, sel_idx = 0.0, None, []
+
+                        # train hybrid
+                        if XGBClassifier is not None:
+                            try:
+                                acc_hyb, ann_h, xgb_h = train_hybrid(X_train, y_train, X_test, y_test)
+                            except Exception as e:
+                                st.error("Hybrid failed: " + str(e)); acc_hyb, ann_h, xgb_h = 0.0, None, None
+                        else:
+                            st.info("xgboost not installed — skipping hybrid")
+                            acc_hyb, ann_h, xgb_h = 0.0, None, None
+
+                        st.markdown("#### Accuracies")
+                        st.write(f"ANN: **{acc_ann*100:.2f}%**")
+                        st.write(f"ANN + GA: **{acc_ga*100:.2f}%**")
+                        st.write(f"Hybrid ANN→XGBoost: **{acc_hyb*100:.2f}%**")
+
+                        best_acc = max(acc_ann, acc_ga, acc_hyb)
+                        if best_acc == acc_ann:
+                            best_name = "ANN"
+                            best_model = ann_model
+                        elif best_acc == acc_ga:
+                            best_name = "ANN+GA"
+                            best_model = ann_ga
+                        else:
+                            best_name = "Hybrid"
+                            best_model = {"ann": ann_h, "xgb": xgb_h}
+
+                        st.success(f"Best: {best_name} ({best_acc*100:.2f}%)")
+
+                        # save artifacts
+                        artifacts = {
+                            "preproc": preproc,
+                            "num_cols": num_cols,
+                            "cat_cols": cat_cols,
+                            "target_le": le_target,
+                            "best_name": best_name,
+                            "best_model": best_model,
+                            "ann_model": ann_model,
+                            "ann_ga_model": ann_ga,
+                            "ann_ga_sel": sel_idx,
+                            "hybrid_ann": ann_h,
+                            "hybrid_xgb": xgb_h
+                        }
+                        ok = save_artifacts(ARTIFACT_PATH, artifacts)
+                        st.write("Saved artifacts:", ok)
+                        st.session_state["artifacts"] = artifacts
+
+# ---------------------------
+# Page: Predict Manual
+# ---------------------------
+elif selected == "Predict Manual":
+    st.header("Manual Prediction (single sample)")
+    artifacts = st.session_state.get("artifacts", None) or load_artifacts(ARTIFACT_PATH)
+    if artifacts is None:
+        st.warning("Train models and save artifacts first.")
+    else:
+        df_template = st.session_state.get("df")
+        if df_template is None:
+            st.error("Upload dataset first.")
+        else:
+            features = [c for c in df_template.columns if c != "Sleep Disorder"]
+            num_cols = artifacts["num_cols"]
+            cat_cols = artifacts["cat_cols"]
+            inputs = {}
+            cols_ui = st.columns(2)
+            for i, f in enumerate(features):
+                if f in num_cols:
+                    default = float(df_template[f].median()) if pd.api.types.is_numeric_dtype(df_template[f]) else 0.0
+                    inputs[f] = cols_ui[i%2].number_input(f, value=default)
+                else:
+                    default = str(df_template[f].mode().iloc[0]) if (f in df_template.columns and not df_template[f].mode().empty) else "NA"
+                    inputs[f] = cols_ui[i%2].text_input(f, value=default)
+            if st.button("Predict"):
+                sample = pd.DataFrame([inputs])
+                try:
+                    Xs = transform_df(sample, artifacts["preproc"], num_cols, cat_cols)
+                    best_name = artifacts["best_name"]
+                    if best_name == "Hybrid":
+                        ann_m = artifacts.get("hybrid_ann"); xgb_m = artifacts.get("hybrid_xgb")
+                        if ann_m is None or xgb_m is None:
+                            st.error("Hybrid model not available.")
+                        else:
+                            pred = xgb_m.predict(ann_m.predict_proba(Xs))[0]
+                    elif best_name == "ANN+GA":
+                        ann_ga = artifacts.get("ann_ga_model"); sel = artifacts.get("ann_ga_sel", [])
+                        if ann_ga is None or len(sel)==0:
+                            st.error("ANN+GA not available.")
+                        else:
+                            pred = ann_ga.predict(Xs[:, sel])[0]
                     else:
-                        # if cat transformer pipeline exists
-                        pass
-                # If proc_names length mismatches, fallback to numeric indexes
+                        ann_m = artifacts.get("ann_model")
+                        if ann_m is None:
+                            st.error("ANN not available.")
+                        else:
+                            pred = ann_m.predict(Xs)[0]
+                    # decode
+                    target_le = artifacts.get("target_le", None)
+                    if target_le is not None:
+                        try:
+                            label = target_le.inverse_transform([int(pred)])[0]
+                        except Exception:
+                            label = pred
+                    else:
+                        label = pred
+                    st.success(f"Predicted Sleep Disorder: {label}")
+                except Exception as e:
+                    st.error(f"Prediction failed: {e}")
+
+# ---------------------------
+# Page: Predict Bulk
+# ---------------------------
+elif selected == "Predict Bulk":
+    st.header("Bulk Prediction (CSV)")
+    artifacts = st.session_state.get("artifacts", None) or load_artifacts(ARTIFACT_PATH)
+    if artifacts is None:
+        st.warning("Train models and save artifacts first.")
+    else:
+        upload = st.file_uploader("Upload CSV for prediction", type=["csv"])
+        if upload is not None:
+            try:
+                newdf = pd.read_csv(upload)
+                if "Sleep Disorder" in newdf.columns:
+                    newdf = newdf.drop(columns=["Sleep Disorder"])
+                Xnew = transform_df(newdf, artifacts["preproc"], artifacts["num_cols"], artifacts["cat_cols"])
+                best_name = artifacts["best_name"]
+                if best_name == "Hybrid":
+                    ann_m = artifacts.get("hybrid_ann"); xgb_m = artifacts.get("hybrid_xgb")
+                    preds = xgb_m.predict(ann_m.predict_proba(Xnew)) if ann_m is not None and xgb_m is not None else np.array([None]*len(Xnew))
+                elif best_name == "ANN+GA":
+                    ann_ga = artifacts.get("ann_ga_model"); sel = artifacts.get("ann_ga_sel", [])
+                    preds = ann_ga.predict(Xnew[:, sel]) if ann_ga is not None and len(sel)>0 else np.array([None]*len(Xnew))
+                else:
+                    ann_m = artifacts.get("ann_model")
+                    preds = ann_m.predict(Xnew) if ann_m is not None else np.array([None]*len(Xnew))
+                # decode
+                tle = artifacts.get("target_le", None)
+                if tle is not None:
+                    try:
+                        labels = tle.inverse_transform(preds.astype(int))
+                    except Exception:
+                        labels = preds
+                else:
+                    labels = preds
+                out = newdf.copy()
+                out["Predicted_Sleep_Disorder"] = labels
+                st.dataframe(out.head(100))
+                st.download_button("Download predictions CSV", out.to_csv(index=False).encode("utf-8"), "predictions.csv", "text/csv")
+            except Exception as e:
+                st.error("Bulk predict failed: " + str(e))
+
+# ---------------------------
+# Page: Interpret
+# ---------------------------
+elif selected == "Interpret":
+    st.header("Permutation Feature Importance (grouped)")
+    artifacts = st.session_state.get("artifacts", None) or load_artifacts(ARTIFACT_PATH)
+    df = st.session_state.get("df", None)
+    if artifacts is None or df is None:
+        st.warning("Train and upload dataset first.")
+    else:
+        try:
+            Xraw = df.drop(columns=["Sleep Disorder"])
+            yraw = df["Sleep Disorder"]
+            tle = artifacts.get("target_le", None)
+            y_enc = tle.transform(yraw.astype(str)) if tle is not None else yraw.values
+            Xproc = transform_df(Xraw, artifacts["preproc"], artifacts["num_cols"], artifacts["cat_cols"])
+            # wrapper estimator
+            best_name = artifacts["best_name"]
+            if best_name == "Hybrid" and artifacts.get("hybrid_ann") is not None and artifacts.get("hybrid_xgb") is not None:
+                class Hybrid:
+                    def __init__(self,a,b): self.a=a; self.b=b
+                    def predict(self,Xp): return self.b.predict(self.a.predict_proba(Xp))
+                estimator = Hybrid(artifacts["hybrid_ann"], artifacts["hybrid_xgb"])
+            elif best_name == "ANN+GA" and artifacts.get("ann_ga_model") is not None:
+                estimator = artifacts["ann_ga_model"]
+            else:
+                estimator = artifacts.get("ann_model")
+            if estimator is None:
+                st.error("No trained estimator available for importance.")
+            else:
+                st.info("Computing permutation importance (may take a few seconds)...")
+                res = permutation_importance(estimator, Xproc, y_enc, n_repeats=8, random_state=SEED, n_jobs=1)
+                importances = res.importances_mean
+                # reconstruct processed column names
+                proc_names = []
+                proc_names.extend(artifacts["num_cols"])
+                if len(artifacts["cat_cols"])>0:
+                    # try to pull categories from OneHotEncoder inside ColumnTransformer
+                    try:
+                        ohe = artifacts["preproc"].named_transformers_["cat"].named_steps["ohe"]
+                        for i, col in enumerate(artifacts["cat_cols"]):
+                            cats = ohe.categories_[i]
+                            proc_names.extend([f"{col}__{c}" for c in cats])
+                    except Exception:
+                        # fallback: generic names
+                        proc_names.extend([f"cat_{i}" for i in range(len(importances)-len(artifacts["num_cols"]))])
                 if len(proc_names) != len(importances):
                     proc_names = [f"feat_{i}" for i in range(len(importances))]
                 imp_df = pd.DataFrame({"proc_col": proc_names, "importance": importances})
-                # group by original col (split on '__')
                 imp_df["orig"] = imp_df["proc_col"].apply(lambda x: x.split("__")[0] if "__" in x else x)
                 agg = imp_df.groupby("orig")["importance"].sum().reset_index().sort_values("importance", ascending=False)
                 st.dataframe(agg)
@@ -654,7 +603,10 @@ else:
                 ax.set_xlabel("Permutation importance (mean)")
                 ax.set_ylabel("Feature")
                 st.pyplot(fig)
-    except Exception as e:
-        st.error(f"Interpretability error: {e}")
+        except Exception as e:
+            st.error("Interpretability failed: " + str(e))
 
-# EOF
+# ---------------------------
+# Footer note
+# ---------------------------
+st.markdown("<hr><div style='font-size:12px;color:#666;'>Note: this app expects a dataset with a target column named exactly 'Sleep Disorder'. If your CSV uses a different name, rename it before uploading.</div>", unsafe_allow_html=True)
