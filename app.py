@@ -26,7 +26,7 @@ st.set_page_config(page_title="😴 Sleep Disorder Prediction", layout="wide")
 st.sidebar.title("⚙ Navigation")
 page = st.sidebar.radio("Go to:", ["📂 Upload Dataset", "🚀 Train Models", "🔮 Predict Disorder", "📊 Interpretability"])
 
-# ✅ FIXED LGBMWrapper CLASS
+# ⚡ ULTRA-FAST LGBMWrapper 
 class LGBMWrapper:
     def __init__(self, model):
         self.model = model
@@ -69,25 +69,38 @@ if page == "📂 Upload Dataset":
         st.success("✅ Dataset uploaded successfully!")
         st.dataframe(df.head())
 
-# 🚀 Train Models
+# 🚀 Train Models - ULTRA FAST VERSION ⚡
 elif page == "🚀 Train Models":
     st.title("🚀 Train and Compare Models")
     if "df" not in st.session_state:
         st.warning("⚠️ Please upload dataset first!")
     else:
+        # ⚡ Progress bar & fast training
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
         df = st.session_state.df.copy()
+        status_text.text("🔄 Encoding categorical variables...")
+        progress_bar.progress(10)
 
         label_encoders = {}
         for col in df.select_dtypes(include="object").columns:
             le = LabelEncoder()
             df[col] = le.fit_transform(df[col])
             label_encoders[col] = le
+        progress_bar.progress(20)
 
         X = df.drop("Sleep Disorder", axis=1)
         y = df["Sleep Disorder"]
-
-        smt = SMOTETomek(random_state=SEED)
-        X_res, y_res = smt.fit_resample(X, y)
+        
+        # ⚡ SKIP SMOTE for speed (optional toggle)
+        if st.checkbox("🚀 Skip SMOTE (3x faster)", value=True):
+            X_res, y_res = X, y
+        else:
+            status_text.text("🔄 Balancing data with SMOTETomek...")
+            smt = SMOTETomek(random_state=SEED)
+            X_res, y_res = smt.fit_resample(X, y)
+        progress_bar.progress(30)
 
         X_train, X_test, y_train, y_test = train_test_split(
             X_res, y_res, test_size=0.2, stratify=y_res, random_state=SEED
@@ -96,22 +109,25 @@ elif page == "🚀 Train Models":
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
+        progress_bar.progress(40)
 
-        st.info("⏳ Training models...")
-
+        # ⚡ ULTRA-FAST MODEL CONFIGS
         models = {
-            "SVM": SVC(C=1, kernel="rbf", probability=True, random_state=SEED),
-            "Random Forest": RandomForestClassifier(n_estimators=300, max_depth=20, random_state=SEED),
-            "LightGBM": LGBMWrapper(LGBMClassifier(n_estimators=300, learning_rate=0.05, random_state=SEED)),
-            "CatBoost": CatBoostClassifier(iterations=300, verbose=0, random_state=SEED),
-            "XGBoost": XGBClassifier(eval_metric="mlogloss", use_label_encoder=False, random_state=SEED),
-            "ANN": MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=500, random_state=SEED),
+            "Random Forest": RandomForestClassifier(n_estimators=100, max_depth=10, random_state=SEED, n_jobs=-1),
+            "LightGBM": LGBMWrapper(LGBMClassifier(n_estimators=100, learning_rate=0.1, random_state=SEED, n_jobs=-1, verbosity=-1)),
+            "XGBoost": XGBClassifier(n_estimators=100, learning_rate=0.1, random_state=SEED, n_jobs=-1, eval_metric="mlogloss"),
+            "CatBoost": CatBoostClassifier(iterations=100, verbose=0, random_state=SEED, thread_count=-1),
         }
 
         results = {}
-        for name, model in models.items():
+        model_names = list(models.keys())
+        
+        for i, (name, model) in enumerate(models.items()):
+            status_text.text(f"🚀 Training {name}... ({i+1}/{len(models)})")
             model.fit(X_train_scaled, y_train)
-            results[name] = accuracy_score(y_test, model.predict(X_test_scaled))
+            y_pred = model.predict(X_test_scaled)
+            results[name] = accuracy_score(y_test, y_pred)
+            progress_bar.progress(40 + (60 * (i+1) / len(models)))
 
         acc_df = pd.DataFrame(list(results.items()), columns=["Model", "Accuracy"])
         acc_df["Accuracy"] = (acc_df["Accuracy"] * 100).round(2)
@@ -125,14 +141,18 @@ elif page == "🚀 Train Models":
         st.session_state.label_encoders = label_encoders
         st.session_state.feature_order = list(X.columns)
 
+        # ⚡ Fast confusion matrix
         cm = confusion_matrix(y_test, models[best_model_name].predict(X_test_scaled))
-        fig, ax = plt.subplots(figsize=(8, 6))
+        fig, ax = plt.subplots(figsize=(6, 5))
         sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax)
         st.pyplot(fig)
 
         if st.button("💾 Save Best Model"):
             save_model(models[best_model_name], scaler, label_encoders, list(X.columns))
             st.success("✅ Model saved!")
+        
+        progress_bar.progress(100)
+        status_text.text("✅ Training complete!")
 
 # 🔮 Predict Disorder
 elif page == "🔮 Predict Disorder":
@@ -246,7 +266,7 @@ elif page == "📊 Interpretability":
         with st.spinner("⏳ Calculating feature importance..."):
             result = permutation_importance(
                 best_model, X_scaled, y_encoded,
-                n_repeats=10, random_state=SEED, scoring="accuracy"
+                n_repeats=5, random_state=SEED, scoring="accuracy"  # Reduced repeats
             )
 
         sorted_idx = result.importances_mean.argsort()[::-1]
@@ -264,4 +284,3 @@ elif page == "📊 Interpretability":
         st.subheader("📋 Top Features")
         st.dataframe(importance_df.head(10))
         st.success("✅ Analysis complete!")
-
