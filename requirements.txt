@@ -2,10 +2,12 @@ streamlit
 pandas
 numpy
 scikit-learn
+torch
 xgboost
 lightgbm
 tensorflow
 shap
 pygad
-torch
+
 matplotlib
+
