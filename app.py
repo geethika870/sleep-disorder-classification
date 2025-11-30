@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import pickle, os, random
+import pickle, joblib, os, random
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.metrics import accuracy_score, confusion_matrix
@@ -9,12 +9,14 @@ from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.neural_network import MLPClassifier
 from xgboost import XGBClassifier
-from lightgbm import LGBMClassifier
 from catboost import CatBoostClassifier
-from imblearn.combine import SMOTETomek
 from sklearn.inspection import permutation_importance
 import matplotlib.pyplot as plt
 import seaborn as sns
+from imblearn.combine import SMOTETomek
+
+# ✅ Import DEAP correctly
+from deap import base, creator, tools, algorithms
 
 SEED = 42
 random.seed(SEED)
@@ -24,28 +26,56 @@ st.set_page_config(page_title="😴 Sleep Disorder Prediction", layout="wide")
 st.sidebar.title("⚙ Navigation")
 page = st.sidebar.radio("Go to:", ["📂 Upload Dataset", "🚀 Train Models", "🔮 Predict Disorder", "📊 Interpretability"])
 
+# ✅ FIXED DEAP Genetic Algorithm Function
+def ga_feature_selection(X_train, y_train):
+    n_features = X_train.shape[1]
+
+    # Reset creator to avoid duplicate creation errors
+    if "FitnessMax" in creator.__dict__:
+        del creator.FitnessMax
+    if "Individual" in creator.__dict__:
+        del creator.Individual
+
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    def eval_individual(ind):
+        selected = [i for i in range(n_features) if ind[i] == 1]
+        if not selected:
+            return (0,)
+        clf = MLPClassifier(hidden_layer_sizes=(64, 32), max_iter=200, random_state=SEED)
+        clf.fit(X_train[:, selected], y_train)
+        return (clf.score(X_train[:, selected], y_train),)
+
+    toolbox = base.Toolbox()
+    toolbox.register("attr", random.randint, 0, 1)
+    toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.attr, n=n_features)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("evaluate", eval_individual)
+    toolbox.register("mate", tools.cxTwoPoint)
+    toolbox.register("mutate", tools.mutFlipBit, indpb=0.05)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+
+    pop = toolbox.population(n=25)
+    algorithms.eaSimple(pop, toolbox, cxpb=0.5, mutpb=0.2, ngen=15, verbose=False)
+
+    best = tools.selBest(pop, k=1)[0]
+    return [i for i in range(n_features) if best[i] == 1]
 
 def save_model(best_model, scaler, label_encoders, feature_order, selected_features=None):
-    # Save real model objects, remove any wrappers
     with open("best_model.pkl", "wb") as f:
-        pickle.dump({
-            "model": best_model,
-            "scaler": scaler,
-            "encoders": label_encoders,
-            "features": feature_order,
-            "ga_feats": selected_features
-        }, f)
-
+        pickle.dump((best_model, scaler, label_encoders, feature_order, selected_features), f)
 
 def load_model_file():
     if os.path.exists("best_model.pkl"):
         with open("best_model.pkl", "rb") as f:
             data = pickle.load(f)
-            return data["model"], data["scaler"], data["encoders"], data["features"], data.get("ga_feats")
+            if len(data) == 4:
+                return *data, None  # old save compatibility
+            return data
     return None, None, None, None, None
 
-
-# ---------- UPLOAD ----------
+# 📂 Upload Dataset
 if page == "📂 Upload Dataset":
     st.title("📂 Upload Sleep Dataset")
     file = st.file_uploader("Upload CSV", type=["csv"])
@@ -58,120 +88,71 @@ if page == "📂 Upload Dataset":
             df.drop("Blood Pressure", axis=1, inplace=True)
 
         st.session_state.df = df
-        st.success("✅ Dataset uploaded!")
+        st.success("✅ Dataset uploaded successfully!")
         st.dataframe(df.head())
 
-
-# ---------- TRAIN ----------
+# 🚀 Train Models
 elif page == "🚀 Train Models":
     st.title("🚀 Train and Compare Models")
-
     if "df" not in st.session_state:
         st.warning("Upload dataset first!")
     else:
         df = st.session_state.df.copy()
 
-        # Encode categoricals
+        # Encode categorical values
         label_encoders = {}
         for col in df.select_dtypes(include="object").columns:
             le = LabelEncoder()
             df[col] = le.fit_transform(df[col])
             label_encoders[col] = le
 
-        # Split X, y
         X = df.drop("Sleep Disorder", axis=1)
         y = df["Sleep Disorder"]
 
-        # Resample
+        # Balance dataset
         smt = SMOTETomek(random_state=SEED)
         X_res, y_res = smt.fit_resample(X, y)
 
-        # Train-test split
         X_train, X_test, y_train, y_test = train_test_split(
             X_res, y_res, test_size=0.2, stratify=y_res, random_state=SEED
         )
 
-        # Scale
+        # Scale features
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
 
-        # ---- GA Feature selection for ANN ----
-        def ga_feature_selection(X_train, y_train):
-            n_features = X_train.shape[1]
-
-            # reset GA creators if rerun
-            try:
-                del creator.FitnessMax, creator.Individual
-            except:
-                pass
-
-            creator.create("FitnessMax", base.Fitness, weights=(1.0,))
-            creator.create("Individual", list, fitness=creator.FitnessMax)
-
-            def eval_ind(ind):
-                selected = [i for i, bit in enumerate(ind) if bit == 1]
-                if len(selected) == 0:
-                    return (0,)
-                clf = MLPClassifier(hidden_layer_sizes=(64, 32), max_iter=200, random_state=SEED)
-                clf.fit(X_train[:, selected], y_train)
-                return (clf.score(X_train[:, selected], y_train),)
-
-            toolbox = base.Toolbox()
-            toolbox.register("attr_bool", random.randint, 0, 1)
-            toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.attr_bool, n=n_features)
-            toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-            toolbox.register("evaluate", eval_ind)
-            toolbox.register("mate", tools.cxTwoPoint)
-            toolbox.register("mutate", tools.mutFlipBit, indpb=0.05)  # ✅ FIXED
-            toolbox.register("select", tools.selTournament, tournsize=3)
-
-            pop = toolbox.population(n=20)
-            algorithms.eaSimple(pop, toolbox, cxpb=0.5, mutpb=0.2, ngen=15, verbose=False)
-
-            best = tools.selBest(pop, 1)[0]
-            return [i for i, bit in enumerate(best) if bit == 1]
-
+        # ✅ Apply GA feature selection
         selected_features = ga_feature_selection(X_train_scaled, y_train)
-        st.write("🧬 GA Selected Feature Indexes:", selected_features)
+        st.write("🧬 GA selected features:", selected_features)
 
-        # Train base models
+        st.info("⏳ Training models...")
+
         models = {
-            "SVM": SVC(C=1, kernel="rbf", probability=True),
+            "SVM": SVC(C=1, kernel="rbf", probability=True, random_state=SEED),
             "Random Forest": RandomForestClassifier(n_estimators=300, max_depth=20, random_state=SEED),
-            "LightGBM": LGBMClassifier(n_estimators=300, learning_rate=0.05, random_state=SEED),
             "CatBoost": CatBoostClassifier(iterations=300, verbose=0, random_state=SEED),
             "XGBoost": XGBClassifier(eval_metric="mlogloss", use_label_encoder=False, random_state=SEED),
-            "ANN": MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=500, random_state=SEED),
             "ANN+GA": MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=500, random_state=SEED)
         }
 
-        # Fit models (ANN+GA gets selected columns only)
-        for name, model in models.items():
-            if name == "ANN+GA":
-                model.fit(X_train_scaled[:, selected_features], y_train)
-            else:
-                model.fit(X_train_scaled, y_train)
-
-        # Evaluate
+        # Train models and evaluate
         results = {}
         for name, model in models.items():
-            if name == "ANN+GA":
-                y_pred = model.predict(X_test_scaled[:, selected_features])
+            if name == "ANN+GA":  # use GA selected features only
+                model.fit(X_train_scaled[:, selected_features], y_train)
+                results[name] = accuracy_score(y_test, model.predict(X_test_scaled[:, selected_features]))
             else:
-                y_pred = model.predict(X_test_scaled)
-            results[name] = accuracy_score(y_test, y_pred)
+                model.fit(X_train_scaled, y_train)
+                results[name] = accuracy_score(y_test, model.predict(X_test_scaled))
 
-        acc_df = pd.DataFrame.from_dict(results, orient="index", columns=["Accuracy"])
+        acc_df = pd.DataFrame(list(results.items()), columns=["Model", "Accuracy"])
         acc_df["Accuracy"] = (acc_df["Accuracy"] * 100).round(2)
-        acc_df = acc_df.reset_index().rename(columns={"index": "Model"})
         st.table(acc_df)
 
-        # Pick winner
         best_model_name = acc_df.iloc[acc_df["Accuracy"].idxmax()]["Model"]
         st.success(f"🏆 Best Model: {best_model_name}")
 
-        # Save correct model, scaler, encoders
         st.session_state.best_model = models[best_model_name]
         st.session_state.scaler = scaler
         st.session_state.label_encoders = label_encoders
@@ -179,133 +160,130 @@ elif page == "🚀 Train Models":
         st.session_state.selected_features = selected_features if best_model_name == "ANN+GA" else None
 
         # Confusion Matrix
-        if best_model_name == "ANN+GA":
-            cm = confusion_matrix(y_test, models["ANN+GA"].predict(X_test_scaled[:, selected_features]))
-        else:
-            cm = confusion_matrix(y_test, models[best_model_name].predict(X_test_scaled))
+        cm = confusion_matrix(y_test, st.session_state.best_model.predict(
+            X_test_scaled[:, selected_features] if best_model_name == "ANN+GA" else X_test_scaled
+        ))
 
         fig, ax = plt.subplots()
-        sns.heatmap(cm, annot=True, fmt="d", ax=ax)
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax)
         st.pyplot(fig)
 
         if st.button("💾 Save Best Model"):
-            selected = selected_features if best_model_name == "ANN+GA" else None
-            save_model(models[best_model_name], scaler, label_encoders, list(X.columns), selected)
-            st.success("✅ Model saved safely!")
+            save_model(models[best_model_name], scaler, label_encoders, list(X.columns), st.session_state.selected_features)
+            st.success("✅ Model saved!")
 
-
-# ---------- PREDICT ----------
+# 🔮 Predict Disorder
 elif page == "🔮 Predict Disorder":
     st.title("🔮 Predict Sleep Disorder")
+    best_model, scaler, label_encoders, feature_order, selected_features = load_model_file()
 
-    model, scaler, encoders, features, ga_feats = load_model_file()
-
-    # Auto-load to session if saved
-    if model:
-        st.session_state.best_model = model
-        st.session_state.scaler = scaler
-        st.session_state.label_encoders = encoders
-        st.session_state.feature_order = features
-        st.session_state.selected_features = ga_feats
-
-    if "best_model" not in st.session_state:
-        st.warning("Train or load a model first!")
+    if not best_model:
+        st.warning("Train and save a model first!")
     else:
-        pred_mode = st.radio("Mode:", ["Manual", "Bulk"])
+        st.session_state.best_model = best_model
+        st.session_state.scaler = scaler
+        st.session_state.label_encoders = label_encoders
+        st.session_state.feature_order = feature_order
+        st.session_state.selected_features = selected_features
 
-        if pred_mode == "Manual":
+        mode = st.radio("Prediction Mode", ["Manual Input", "Bulk Prediction"])
+
+        if mode == "Manual Input":
             gender = st.selectbox("Gender", ["Male", "Female"])
             age = st.slider("Age", 1, 100, 25)
-            occ = st.selectbox("Occupation", ["Software Engineer", "Doctor", "Nurse", "Teacher", "Manager", "Student"])
-            sleep = st.slider("Sleep Duration", 3.0, 12.0, 7.0)
-            quality = st.slider("Sleep Quality", 1, 10, 7)
-            pa = st.slider("Physical Activity", 0, 100, 50)
-            stress = st.slider("Stress", 1, 10, 5)
-            bmi = st.selectbox("BMI Category", ["Normal", "Overweight", "Obese", "Underweight"])
-            sbp = st.slider("Systolic", 80, 180, 120)
-            dbp = st.slider("Diastolic", 50, 120, 80)
+            occupation = st.selectbox("Occupation", ["Software Engineer", "Doctor", "Nurse", "Teacher", "Manager", "Student"])
+            sleep_dur = st.slider("Sleep Duration", 3.0, 12.0, 7.0)
+            q_sleep = st.slider("Quality of Sleep", 1, 10, 7)
+            phys_act = st.slider("Physical Activity Level", 0, 100, 50)
+            stress = st.slider("Stress Level", 1, 10, 5)
+            bmi_cat = st.selectbox("BMI Category", ["Normal", "Overweight", "Obese", "Underweight"])
+            sys_bp = st.slider("Systolic BP", 80, 180, 120)
+            dia_bp = st.slider("Diastolic BP", 50, 120, 80)
             hr = st.slider("Heart Rate", 40, 120, 70)
             steps = st.slider("Daily Steps", 0, 20000, 5000)
 
-            input_df = pd.DataFrame([{
-                "Gender": gender, "Age": age, "Occupation": occ,
-                "Sleep Duration": sleep, "Quality of Sleep": quality,
-                "Physical Activity Level": pa, "Stress Level": stress,
-                "BMI Category": bmi, "Systolic_BP": sbp,
-                "Diastolic_BP": dbp, "Heart Rate": hr, "Daily Steps": steps
+            user_data = pd.DataFrame([{
+                "Gender": gender, "Age": age, "Occupation": occupation,
+                "Sleep Duration": sleep_dur, "Quality of Sleep": q_sleep,
+                "Physical Activity Level": phys_act, "Stress Level": stress,
+                "BMI Category": bmi_cat, "Systolic_BP": sys_bp,
+                "Diastolic_BP": dia_bp, "Heart Rate": hr, "Daily Steps": steps
             }])
 
-            for c, le in st.session_state.label_encoders.items():
-                if c in input_df.columns:
-                    if input_df[c].iloc[0] not in le.classes_:
-                        le.classes_ = np.append(le.classes_, input_df[c].iloc[0])
-                    input_df[c] = le.transform(input_df[c])
+            for col, le in label_encoders.items():
+                if col in user_data.columns:
+                    user_data[col] = user_data[col].apply(lambda x: x if x in le.classes_ else le.classes_[0])
+                    user_data[col] = le.transform(user_data[col])
 
-            input_df = input_df[st.session_state.feature_order]
-            Xs = st.session_state.scaler.transform(input_df)
+            user_data = user_data[feature_order]
 
-            if st.session_state.selected_features is not None:
-                Xs = Xs[:, st.session_state.selected_features]
+            if st.button("🔮 Predict"):
+                if selected_features:
+                    scaled = scaler.transform(user_data)[:, selected_features]
+                else:
+                    scaled = scaler.transform(user_data)
 
-            if st.button("Predict"):
-                num = st.session_state.best_model.predict(Xs)[0]
-                label = st.session_state.label_encoders["Sleep Disorder"].inverse_transform([num])[0]
-                st.success(f"🩺 Result: {label}")
+                pred_num = best_model.predict(scaled)[0]
+                target_encoder = label_encoders["Sleep Disorder"]
+                pred_label = target_encoder.inverse_transform([pred_num])[0]
+
+                st.success(f"🩺 Predicted Sleep Disorder: *{pred_label}*")
 
         else:
-            file = st.file_uploader("Upload CSV", type=["csv"])
+            file = st.file_uploader("Upload CSV without Sleep Disorder", type=["csv"])
             if file:
-                bulk_df = pd.read_csv(file)
+                new_df = pd.read_csv(file)
 
-                if "Blood Pressure" in bulk_df.columns:
-                    bulk_df[["Systolic_BP", "Diastolic_BP"]] = bulk_df["Blood Pressure"].str.split("/", expand=True).astype(int)
-                    bulk_df.drop("Blood Pressure", axis=1, inplace=True)
+                if "Blood Pressure" in new_df.columns:
+                    new_df[["Systolic_BP", "Diastolic_BP"]] = new_df["Blood Pressure"].str.split("/", expand=True).astype(int)
+                    new_df.drop("Blood Pressure", axis=1, inplace=True)
 
-                for c, le in st.session_state.label_encoders.items():
-                    if c in bulk_df.columns:
-                        bulk_df[c] = bulk_df[c].apply(lambda x: x if x in le.classes_ else le.classes_[0])
-                        bulk_df[c] = le.transform(bulk_df[c])
+                for col, le in label_encoders.items():
+                    if col in new_df.columns:
+                        new_df[col] = new_df[col].apply(lambda x: x if x in le.classes_ else le.classes_[0])
+                        new_df[col] = le.transform(new_df[col])
 
-                bulk_df = bulk_df[st.session_state.feature_order]
-                Xs = scaler.transform(bulk_df)
+                new_df = new_df[feature_order]
+                if selected_features:
+                    scaled = scaler.transform(new_df)[:, selected_features]
+                else:
+                    scaled = scaler.transform(new_df)
 
-                if st.session_state.selected_features is not None:
-                    Xs = Xs[:, st.session_state.selected_features]
+                preds = best_model.predict(scaled)
+                preds_labels = label_encoders["Sleep Disorder"].inverse_transform(preds)
+                new_df["Predicted_Sleep_Disorder"] = preds_labels
+                st.dataframe(new_df.head())
 
-                ps = st.session_state.best_model.predict(Xs)
-                bulk_df["Predicted_Sleep_Disorder"] = encoders["Sleep Disorder"].inverse_transform(ps)
-                st.dataframe(bulk_df.head())
-
-
-# ---------- INTERPRET ----------
+# 📊 Interpretability
 elif page == "📊 Interpretability":
-    st.title("📊 Model Interpretability")
+    st.title("📊 Model Interpretability - Feature Importance")
+    best_model, scaler, label_encoders, feature_order, selected_features = load_model_file()
 
-    if "df" not in st.session_state or "best_model" not in st.session_state:
-        st.warning("Upload + train first!")
+    if not best_model:
+        st.warning("No saved model found! Train first.")
     else:
-        df = st.session_state.df.copy()
-        enc = st.session_state.label_encoders
-        features = st.session_state.feature_order
-        scaler = st.session_state.scaler
-        model = st.session_state.best_model
+        X = st.session_state.df[feature_order]
+        y = st.session_state.df["Sleep Disorder"]
 
-        for c, le in enc.items():
-            if c in df.columns and df[c].dtype == object:
-                df[c] = df[c].apply(lambda x: x if x in le.classes_ else le.classes_[0])
-                df[c] = le.transform(df[c])
+        y_encoded = label_encoders["Sleep Disorder"].transform(y)
+        X_scaled = scaler.transform(X)
 
-        X = df[features]
-        y = enc["Sleep Disorder"].transform(df["Sleep Disorder"]) if df["Sleep Disorder"].dtype == object else df["Sleep Disorder"]
-        Xs = scaler.transform(X)
-        if st.session_state.selected_features is not None:
-            Xs = Xs[:, st.session_state.selected_features]
+        if selected_features:
+            X_scaled = X_scaled[:, selected_features]
 
-        imp = permutation_importance(model, Xs, y, n_repeats=10, random_state=SEED)
-        idx = imp.importances_mean.argsort()[::-1]
+        st.info("⏳ Calculating permutation importance...")
+        result = permutation_importance(
+            best_model, X_scaled, y_encoded,
+            n_repeats=10, random_state=SEED, scoring="accuracy"
+        )
+
+        sorted_idx = result.importances_mean.argsort()[::-1]
+        features = np.array(feature_order if not selected_features else np.array(feature_order)[selected_features])
 
         fig, ax = plt.subplots(figsize=(10, 6))
-        sns.barplot(x=imp.importances_mean[idx], y=np.array(features)[idx], ax=ax)
+        sns.barplot(x=result.importances_mean[sorted_idx], y=features[sorted_idx], ax=ax)
+        ax.set_title("Permutation Feature Importance")
+        ax.set_xlabel("Mean Importance")
         st.pyplot(fig)
-        st.success("✅ Importance computed!")
+        st.success("✅ Feature importance calculated!")
 
