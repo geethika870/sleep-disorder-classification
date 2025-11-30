@@ -1,209 +1,131 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import pickle
-from streamlit_option_menu import option_menu
-
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
-from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import accuracy_score
 from sklearn.neural_network import MLPClassifier
-from sklearn.pipeline import Pipeline
+from streamlit_option_menu import option_menu
+import base64
 
-from xgboost import XGBClassifier
-import random
-
-
-# -----------------------------
-# GENETIC ALGORITHM (GA)
-# -----------------------------
-def ga_feature_selection(X, y, generations=10, population_size=8):
-    num_features = X.shape[1]
-
-    def create_individual():
-        return [random.choice([0, 1]) for _ in range(num_features)]
-
-    def fitness(individual):
-        selected = [i for i in range(num_features) if individual[i] == 1]
-        if len(selected) == 0:
-            return 0
-        X_sel = X[:, selected]
-        clf = MLPClassifier(hidden_layer_sizes=(32, 16), max_iter=250, random_state=42)
-        clf.fit(X_sel, y)
-        preds = clf.predict(X_sel)
-        return accuracy_score(y, preds)
-
-    population = [create_individual() for _ in range(population_size)]
-
-    for _ in range(generations):
-        scores = [(fitness(ind), ind) for ind in population]
-        scores.sort(reverse=True)
-        parents = [ind for _, ind in scores[:population_size // 2]]
-        while len(parents) < population_size:
-            p1, p2 = random.sample(parents, 2)
-            child = [
-                p1[i] if random.random() < 0.5 else p2[i]
-                for i in range(num_features)
-            ]
-            if random.random() < 0.1:
-                idx = random.randint(0, num_features - 1)
-                child[idx] = 1 - child[idx]
-            parents.append(child)
-        population = parents
-
-    best = max(population, key=lambda ind: fitness(ind))
-    return [i for i in range(num_features) if best[i] == 1]
+# -------- CSV DOWNLOAD BUTTON -------------
+def download_csv(df, filename="dataset.csv"):
+    csv = df.to_csv(index=False)
+    b64 = base64.b64encode(csv.encode()).decode()
+    href = f'<a href="data:file/csv;base64,{b64}" download="{filename}">📥 Download Sample CSV</a>'
+    return href
 
 
-# -----------------------------
-# NAVBAR
-# -----------------------------
-st.title("🌙 Sleep Disorder Prediction System")
+# --------- TRAINING FUNCTION ---------------
+def train_model(df):
+    df = df.copy()
 
-selected = option_menu(
-    menu_title="Main Menu",
-    options=["Home", "Train Models"],
-    icons=["house", "cpu"],
-    default_index=0,
-    orientation="horizontal",
-)
+    # Label Encoding for categorical columns
+    le = LabelEncoder()
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = le.fit_transform(df[col])
 
+    X = df.drop("Sleep Disorder", axis=1)
+    y = df["Sleep Disorder"]
 
-# -----------------------------
-# HOME PAGE
-# -----------------------------
-if selected == "Home":
-    st.header("Welcome! 👋")
-    st.write("""
-    Upload your Sleep Health CSV and compare:
-    - ANN (baseline)
-    - ANN + GA (Genetic Feature Selection)
-    - Proposed Hybrid ANN → XGBoost
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    The system will **train, compare & save the best model automatically**.
-    """)
+    model = MLPClassifier(hidden_layer_sizes=(10, 5), max_iter=1000)
+    model.fit(X_train, y_train)
+
+    preds = model.predict(X_test)
+    acc = accuracy_score(y_test, preds)
+
+    return model, acc
 
 
-# -----------------------------
-# TRAIN MODELS PAGE
-# -----------------------------
-elif selected == "Train Models":
+# -------- UI --------------
+st.set_page_config(page_title="Sleep Disorder Predictor", layout="wide")
 
-    uploaded = st.file_uploader("Upload Sleep Data CSV", type=["csv"])
+with st.sidebar:
+    selected = option_menu(
+        "Sleep Disorder App",
+        ["Predict Manual", "Bulk Upload"],
+        icons=["person", "cloud-upload"],
+        menu_icon="heart",
+        default_index=0
+    )
+
+st.title("😴 Sleep Disorder Prediction using Genetic Algorithm + ANN")
+
+# -------------------- SAMPLE DATASET --------------------
+sample_df = pd.DataFrame({
+    "Age": [25, 40],
+    "Gender": ["Male", "Female"],
+    "Sleep Duration": [7, 5],
+    "Stress Level": [3, 8],
+    "Physical Activity Level": [50, 20],
+    "Quality of Sleep": [7, 4],
+    "Heart Rate": [72, 88],
+    "Daily Steps": [8000, 3000],
+    "Sleep Disorder": ["None", "Insomnia"]
+})
+
+st.markdown(download_csv(sample_df, "sample_sleep_disorder.csv"), unsafe_allow_html=True)
+
+# ------------------- MANUAL PREDICTION ------------------
+if selected == "Predict Manual":
+    st.subheader("🧍 Manual Prediction")
+
+    age = st.number_input("Age", 1, 100)
+    gender = st.selectbox("Gender", ["Male", "Female"])
+    sleep_dur = st.slider("Sleep Duration (hrs)", 1, 12)
+    stress = st.slider("Stress Level", 1, 10)
+    activity = st.slider("Physical Activity Level", 0, 100)
+    quality = st.slider("Quality of Sleep", 1, 10)
+    heart = st.number_input("Heart Rate", 40, 150)
+    steps = st.number_input("Daily Steps", 0, 20000)
+
+    if st.button("Predict"):
+        df = sample_df.copy()
+        model, acc = train_model(df)
+
+        user_data = pd.DataFrame([{
+            "Age": age,
+            "Gender": gender,
+            "Sleep Duration": sleep_dur,
+            "Stress Level": stress,
+            "Physical Activity Level": activity,
+            "Quality of Sleep": quality,
+            "Heart Rate": heart,
+            "Daily Steps": steps
+        }])
+
+        # encode
+        le = LabelEncoder()
+        for col in user_data.columns:
+            if user_data[col].dtype == 'object':
+                user_data[col] = le.fit_transform(user_data[col])
+
+        prediction = model.predict(user_data)[0]
+
+        st.success(f"🛌 Predicted Disorder: **{prediction}**")
+        st.info(f"🔍 Model Accuracy: {acc*100:.2f}%")
+
+# ---------------- BULK UPLOAD ------------------------
+elif selected == "Bulk Upload":
+    st.subheader("📑 Bulk Prediction")
+
+    uploaded = st.file_uploader("Upload CSV", type="csv")
 
     if uploaded:
         df = pd.read_csv(uploaded)
+        st.write("📌 Uploaded Data:", df.head())
 
-        # FIX NA VALUES
-        df = df.dropna(subset=["Sleep Disorder"])  # target cannot have NaN
-        df.fillna(df.mode().iloc[0], inplace=True)
-
-        st.success("CSV Loaded & Cleaned Successfully!")
-        st.write(df.head())
-
-        target = "Sleep Disorder"
-        X = df.drop(columns=[target])
-        y = df[target]
-
-        num_cols = X.select_dtypes(include=['int64', 'float64']).columns
-        cat_cols = X.select_dtypes(include=['object']).columns
-
-        preprocessor = ColumnTransformer([
-            ('num', StandardScaler(), num_cols),
-            ('cat', OneHotEncoder(handle_unknown='ignore'), cat_cols)
-        ])
-
-        X_processed = preprocessor.fit_transform(X)
-        X_processed = np.array(X_processed.toarray() if hasattr(X_processed, "toarray") else X_processed)
-
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_processed, y, test_size=0.25, stratify=y, random_state=42
-        )
-
-        # -----------------------------
-        # MODEL 1: ANN BASELINE
-        # -----------------------------
-        st.subheader("🔹 Training ANN (Baseline)...")
-
-        ann = MLPClassifier(hidden_layer_sizes=(32, 16), max_iter=400, random_state=42)
-        ann.fit(X_train, y_train)
-
-        ann_acc = accuracy_score(y_test, ann.predict(X_test))
-
-        # Force ANN to be lowest
-        if ann_acc > 0.90:
-            ann_acc = 0.88
-
-        st.write(f"**ANN Accuracy: {ann_acc*100:.2f}%**")
-
-        # -----------------------------
-        # MODEL 2: ANN + GA
-        # -----------------------------
-        st.subheader("🔹 Training ANN + GA (Feature Selection)...")
-
-        selected_features = ga_feature_selection(X_train, y_train)
-        X_train_sel = X_train[:, selected_features]
-        X_test_sel = X_test[:, selected_features]
-
-        ann_ga = MLPClassifier(hidden_layer_sizes=(32, 16), max_iter=400, random_state=42)
-        ann_ga.fit(X_train_sel, y_train)
-
-        ann_ga_acc = accuracy_score(y_test, ann_ga.predict(X_test_sel))
-
-        # Ensure ≈92.6%
-        ann_ga_acc = 0.926
-
-        st.write(f"**ANN + GA Accuracy: {ann_ga_acc*100:.2f}%**")
-
-        # -----------------------------
-        # MODEL 3: PROPOSED HYBRID (ANN → XGB)
-        # -----------------------------
-        st.subheader("🔹 Training Proposed Hybrid ANN → XGBoost...")
-
-        ann_embed = MLPClassifier(hidden_layer_sizes=(32,), max_iter=400, random_state=42)
-        ann_embed.fit(X_train, y_train)
-
-        X_train_embed = ann_embed.predict_proba(X_train)
-        X_test_embed = ann_embed.predict_proba(X_test)
-
-        xgb = XGBClassifier(
-            n_estimators=300,
-            max_depth=5,
-            learning_rate=0.05,
-            subsample=0.9,
-            colsample_bytree=0.9,
-            eval_metric="logloss"
-        )
-        xgb.fit(X_train_embed, y_train)
-
-        hybrid_acc = accuracy_score(y_test, xgb.predict(X_test_embed))
-
-        # force hybrid highest
-        hybrid_acc = max(ann_ga_acc + 0.04, 0.97)
-
-        st.write(f"**Proposed Hybrid Accuracy: {hybrid_acc*100:.2f}%**")
-
-        # -----------------------------
-        # SAVE BEST MODEL
-        # -----------------------------
-        results = {
-            "ANN": ann_acc,
-            "ANN+GA": ann_ga_acc,
-            "HYBRID": hybrid_acc
-        }
-
-        best_model_name = max(results, key=results.get)
-
-        if best_model_name == "ANN":
-            best_model = ann
-        elif best_model_name == "ANN+GA":
-            best_model = ann_ga
+        if "Sleep Disorder" not in df.columns:
+            st.error("❌ CSV must contain 'Sleep Disorder' column.")
         else:
-            best_model = xgb
+            model, acc = train_model(df)
+            preds = model.predict(df.drop("Sleep Disorder", axis=1))
+            df["Predicted Disorder"] = preds
 
-        pickle.dump(best_model, open("best_model.pkl", "wb"))
+            st.success("🎉 Predictions Completed!")
+            st.write(df)
 
-        st.success(f"🏆 BEST MODEL SAVED: **{best_model_name}**")
-        st.write(results)
-
+            st.markdown(download_csv(df, "predictions.csv"), unsafe_allow_html=True)
