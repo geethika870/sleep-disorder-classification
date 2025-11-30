@@ -256,4 +256,3 @@ elif page == "🔮 Predict Disorder":
                 # DOWNLOAD FILE
                 csv = new_df.to_csv(index=False).encode('utf-8')
                 st.download_button("⬇ Download Predictions CSV", csv, "predictions.csv")
-
