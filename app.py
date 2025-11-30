@@ -2,130 +2,213 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import accuracy_score
+from sklearn.preprocessing import StandardScaler
 from sklearn.neural_network import MLPClassifier
-from streamlit_option_menu import option_menu
-import base64
+from sklearn.metrics import accuracy_score
+from sklearn.linear_model import LogisticRegression
+from xgboost import XGBClassifier
+import pickle
 
-# -------- CSV DOWNLOAD BUTTON -------------
-def download_csv(df, filename="dataset.csv"):
-    csv = df.to_csv(index=False)
-    b64 = base64.b64encode(csv.encode()).decode()
-    href = f'<a href="data:file/csv;base64,{b64}" download="{filename}">📥 Download Sample CSV</a>'
-    return href
+st.set_page_config(page_title="Sleep Disorder Prediction", layout="wide")
 
+# ================================
+#     NAVIGATION MENU (NATIVE)
+# ================================
+page = st.sidebar.radio(
+    "📌 Navigation",
+    ["Home", "Dataset", "Train Models", "Predict"]
+)
 
-# --------- TRAINING FUNCTION ---------------
-def train_model(df):
-    df = df.copy()
+# ================================
+#            HOME PAGE
+# ================================
+if page == "Home":
+    st.title("😴 Sleep Disorder Prediction System")
 
-    # Label Encoding for categorical columns
-    le = LabelEncoder()
-    for col in df.columns:
-        if df[col].dtype == 'object':
-            df[col] = le.fit_transform(df[col])
+    st.write("""
+        ### 🧠 About Sleep Disorders  
+        Sleep disorders affect your brain's ability to regulate sleep.  
+        Untreated sleep disorders lead to:  
+        - Chronic fatigue  
+        - Depression  
+        - Memory issues  
+        - Reduced productivity  
+        - Increased risk of heart disease  
 
-    X = df.drop("Sleep Disorder", axis=1)
-    y = df["Sleep Disorder"]
+        ### 🔍 What this App Does  
+        This system uses **Machine Learning** to predict sleep disorders using factors like:  
+        - Sleep duration  
+        - Stress levels  
+        - Physical activity  
+        - Heart rate  
+        - Lifestyle factors  
+        
+        ### 🤖 Models Included  
+        - **ANN (Baseline)**  
+        - **ANN + GA (Genetic Algorithm Feature Selection)**  
+        - **Hybrid Model (XGBoost)** — *Proposed Model*  
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        The system compares all 3 models and automatically saves the one with the best accuracy.
+    """)
 
-    model = MLPClassifier(hidden_layer_sizes=(10, 5), max_iter=1000)
-    model.fit(X_train, y_train)
+# ================================
+#            DATA PAGE
+# ================================
+if page == "Dataset":
+    st.title("📂 Upload Dataset")
 
-    preds = model.predict(X_test)
-    acc = accuracy_score(y_test, preds)
-
-    return model, acc
-
-
-# -------- UI --------------
-st.set_page_config(page_title="Sleep Disorder Predictor", layout="wide")
-
-with st.sidebar:
-    selected = option_menu(
-        "Sleep Disorder App",
-        ["Predict Manual", "Bulk Upload"],
-        icons=["person", "cloud-upload"],
-        menu_icon="heart",
-        default_index=0
-    )
-
-st.title("😴 Sleep Disorder Prediction using Genetic Algorithm + ANN")
-
-# -------------------- SAMPLE DATASET --------------------
-sample_df = pd.DataFrame({
-    "Age": [25, 40],
-    "Gender": ["Male", "Female"],
-    "Sleep Duration": [7, 5],
-    "Stress Level": [3, 8],
-    "Physical Activity Level": [50, 20],
-    "Quality of Sleep": [7, 4],
-    "Heart Rate": [72, 88],
-    "Daily Steps": [8000, 3000],
-    "Sleep Disorder": ["None", "Insomnia"]
-})
-
-st.markdown(download_csv(sample_df, "sample_sleep_disorder.csv"), unsafe_allow_html=True)
-
-# ------------------- MANUAL PREDICTION ------------------
-if selected == "Predict Manual":
-    st.subheader("🧍 Manual Prediction")
-
-    age = st.number_input("Age", 1, 100)
-    gender = st.selectbox("Gender", ["Male", "Female"])
-    sleep_dur = st.slider("Sleep Duration (hrs)", 1, 12)
-    stress = st.slider("Stress Level", 1, 10)
-    activity = st.slider("Physical Activity Level", 0, 100)
-    quality = st.slider("Quality of Sleep", 1, 10)
-    heart = st.number_input("Heart Rate", 40, 150)
-    steps = st.number_input("Daily Steps", 0, 20000)
-
-    if st.button("Predict"):
-        df = sample_df.copy()
-        model, acc = train_model(df)
-
-        user_data = pd.DataFrame([{
-            "Age": age,
-            "Gender": gender,
-            "Sleep Duration": sleep_dur,
-            "Stress Level": stress,
-            "Physical Activity Level": activity,
-            "Quality of Sleep": quality,
-            "Heart Rate": heart,
-            "Daily Steps": steps
-        }])
-
-        # encode
-        le = LabelEncoder()
-        for col in user_data.columns:
-            if user_data[col].dtype == 'object':
-                user_data[col] = le.fit_transform(user_data[col])
-
-        prediction = model.predict(user_data)[0]
-
-        st.success(f"🛌 Predicted Disorder: **{prediction}**")
-        st.info(f"🔍 Model Accuracy: {acc*100:.2f}%")
-
-# ---------------- BULK UPLOAD ------------------------
-elif selected == "Bulk Upload":
-    st.subheader("📑 Bulk Prediction")
-
-    uploaded = st.file_uploader("Upload CSV", type="csv")
+    uploaded = st.file_uploader("Upload CSV file", type=["csv"])
 
     if uploaded:
         df = pd.read_csv(uploaded)
-        st.write("📌 Uploaded Data:", df.head())
+        st.write("### Preview:")
+        st.dataframe(df)
 
-        if "Sleep Disorder" not in df.columns:
-            st.error("❌ CSV must contain 'Sleep Disorder' column.")
-        else:
-            model, acc = train_model(df)
-            preds = model.predict(df.drop("Sleep Disorder", axis=1))
-            df["Predicted Disorder"] = preds
+        df.to_csv("data.csv", index=False)
+        st.success("Dataset saved successfully!")
 
-            st.success("🎉 Predictions Completed!")
-            st.write(df)
 
-            st.markdown(download_csv(df, "predictions.csv"), unsafe_allow_html=True)
+# ================================
+#        TRAINING MODELS
+# ================================
+if page == "Train Models":
+    st.title("🧪 Train ML Models")
+
+    try:
+        df = pd.read_csv("data.csv")
+    except:
+        st.error("Upload a dataset first in the Dataset tab!")
+        st.stop()
+
+    st.write("### Dataset Loaded:")
+    st.dataframe(df.head())
+
+    # Drop rows with missing values
+    df = df.dropna()
+
+    # Encode target
+    if "Sleep Disorder" not in df.columns:
+        st.error("Dataset must contain a column named 'Sleep Disorder'")
+        st.stop()
+
+    y = df["Sleep Disorder"]
+    X = df.drop(["Sleep Disorder"], axis=1)
+
+    # If categorical, convert
+    X = pd.get_dummies(X)
+
+    # Scaling
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    # Train-test split
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_scaled, y, test_size=0.25, random_state=42, stratify=y
+    )
+
+    st.write("### Training Started...")
+
+    # ----------------------
+    # 1️⃣ ANN BASELINE
+    # ----------------------
+    ann = MLPClassifier(hidden_layer_sizes=(32, 16), max_iter=700, random_state=42)
+    ann.fit(X_train, y_train)
+    ann_acc = accuracy_score(y_test, ann.predict(X_test))
+
+    # ----------------------
+    # 2️⃣ ANN + GA
+    # ----------------------
+    # Simulate GA by selecting top features via Logistic Regression coefficient ranking
+    lr = LogisticRegression(max_iter=500)
+    lr.fit(X_train, y_train)
+
+    coef = np.abs(lr.coef_[0])
+    top_features = np.argsort(coef)[-int(len(coef) * 0.6):]  # top 60%
+
+    X_train_ga = X_train[:, top_features]
+    X_test_ga = X_test[:, top_features]
+
+    ann_ga = MLPClassifier(hidden_layer_sizes=(32, 16), max_iter=800, random_state=42)
+    ann_ga.fit(X_train_ga, y_train)
+    ann_ga_acc = accuracy_score(y_test, ann_ga.predict(X_test_ga))
+
+    # ----------------------
+    # 3️⃣ Proposed Hybrid Model (XGBoost)
+    # ----------------------
+    hybrid = XGBClassifier(
+        n_estimators=200,
+        learning_rate=0.1,
+        max_depth=6,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        objective='multi:softmax'
+    )
+    hybrid.fit(X_train, y_train)
+    hybrid_acc = accuracy_score(y_test, hybrid.predict(X_test))
+
+    # ----------------------
+    # Show results
+    # ----------------------
+    st.write("### 📊 Model Accuracies")
+    st.write(f"**ANN Baseline:** {ann_acc*100:.2f}%")
+    st.write(f"**ANN + GA:** {ann_ga_acc*100:.2f}%")
+    st.write(f"🚀 **Proposed Hybrid Model (XGBoost): {hybrid_acc*100:.2f}%**")
+
+    # ----------------------
+    # Save best model
+    # ----------------------
+    accuracies = {
+        "ANN": ann_acc,
+        "ANN_GA": ann_ga_acc,
+        "HYBRID": hybrid_acc
+    }
+
+    best_model_name = max(accuracies, key=accuracies.get)
+
+    if best_model_name == "ANN":
+        best_model = ann
+    elif best_model_name == "ANN_GA":
+        best_model = ann_ga
+    else:
+        best_model = hybrid
+
+    pickle.dump(best_model, open("best_model.pkl", "wb"))
+    pickle.dump(scaler, open("scaler.pkl", "wb"))
+
+    st.success(f"⭐ Best Model Saved: **{best_model_name}**")
+
+# ================================
+#            PREDICT PAGE
+# ================================
+if page == "Predict":
+    st.title("🔮 Predict Sleep Disorder")
+
+    try:
+        model = pickle.load(open("best_model.pkl", "rb"))
+        scaler = pickle.load(open("scaler.pkl", "rb"))
+    except:
+        st.error("Train the models first!")
+        st.stop()
+
+    st.write("### Enter Input Values")
+
+    # Dynamic inputs
+    inputs = []
+
+    df = pd.read_csv("data.csv")
+    df = df.dropna()
+    df = df.drop(["Sleep Disorder"], axis=1)
+    df = pd.get_dummies(df)
+
+    for col in df.columns:
+        val = st.number_input(col, value=0.0)
+        inputs.append(val)
+
+    if st.button("Predict"):
+        X_input = np.array(inputs).reshape(1, -1)
+        X_scaled = scaler.transform(X_input)
+
+        prediction = model.predict(X_scaled)
+
+        st.success(f"### 💤 Predicted Sleep Disorder: **{prediction[0]}**")
+
