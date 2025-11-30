@@ -1,11 +1,5 @@
-deap
-xgboost
-lightgbm
-catboost
-imblearn
-numpy
+streamlit
 pandas
+numpy
 scikit-learn
-matplotlib
-seaborn
-imbalanced-learn
+xgboost
