@@ -103,7 +103,7 @@ def load_data(uploaded_file):
 def preprocess_data(df):
     df = df.dropna()
     # Target column name guessing (adjust if differs)
-    target_col = "Sleep_Disorder"
+    target_col = "Sleep Disorder"
     X = df.drop(columns=[target_col])
     y = df[target_col]
 
@@ -338,3 +338,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
