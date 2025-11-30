@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import pickle, os, random, time
+import pickle, joblib, os, random
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.metrics import accuracy_score, confusion_matrix
@@ -10,6 +10,8 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.neural_network import MLPClassifier
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
+from catboost import CatBoostClassifier
+from imblearn.combine import SMOTETomek
 from sklearn.inspection import permutation_importance
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -19,159 +21,228 @@ random.seed(SEED)
 np.random.seed(SEED)
 
 st.set_page_config(page_title="😴 Sleep Disorder Prediction", layout="wide")
-page = st.sidebar.radio("Navigation", ["📤 Upload", "🚀 Train", "🔮 Predict", "📊 Interpret"])
+st.sidebar.title("⚙ Navigation")
+page = st.sidebar.radio("Go to:", ["📂 Upload Dataset", "🚀 Train Models", "🔮 Predict Disorder", "📊 Interpretability"])
 
-# ---------------- LIGHTGBM WRAPPER FIX ----------------
+# ✅ FIXED LGBMWrapper CLASS
 class LGBMWrapper:
-    def __init__(self, model):
+    def _init_(self, model):
         self.model = model
+
     def fit(self, X, y):
-        self.model.fit(X, y)
-        return self
+        return self.model.fit(X, y)
+
     def predict(self, X):
         return self.model.predict(X)
+
     def predict_proba(self, X):
         return self.model.predict_proba(X)
-    def __getattr__(self, attr):
+
+    def _getattr_(self, attr):
         return getattr(self.model, attr)
 
-# ---------------- UPLOAD DATA ----------------
-if page == "📤 Upload":
-    st.title("Upload Sleep Dataset")
+def save_model(best_model, scaler, label_encoders, feature_order):
+    with open("best_model.pkl", "wb") as f:
+        pickle.dump((best_model, scaler, label_encoders, feature_order), f)
+
+def load_model_file():
+    if os.path.exists("best_model.pkl"):
+        with open("best_model.pkl", "rb") as f:
+            return pickle.load(f)
+    return None, None, None, None
+
+# 📂 Upload Dataset
+if page == "📂 Upload Dataset":
+    st.title("📂 Upload Sleep Dataset")
     file = st.file_uploader("Upload CSV", type=["csv"])
     if file:
         df = pd.read_csv(file)
-        df = df.dropna(subset=["Sleep Disorder"])  # ✅ remove NaN target rows
+        if "Person ID" in df.columns:
+            df.drop("Person ID", axis=1, inplace=True)
+        if "Blood Pressure" in df.columns:
+            df[["Systolic_BP", "Diastolic_BP"]] = df["Blood Pressure"].str.split("/", expand=True).astype(int)
+            df.drop("Blood Pressure", axis=1, inplace=True)
+
         st.session_state.df = df
-        st.success("✅ Uploaded & cleaned!")
+        st.success("✅ Dataset uploaded successfully!")
         st.dataframe(df.head())
 
-# ---------------- TRAIN 5 MODELS ----------------
-elif page == "🚀 Train":
+# 🚀 Train Models
+elif page == "🚀 Train Models":
+    st.title("🚀 Train and Compare Models")
     if "df" not in st.session_state:
         st.warning("Upload dataset first!")
     else:
         df = st.session_state.df.copy()
 
-        # encode categoricals
-        encoders = {}
+        label_encoders = {}
         for col in df.select_dtypes(include="object").columns:
             le = LabelEncoder()
-            df[col] = le.fit_transform(df[col].astype(str))
-            encoders[col] = le
+            df[col] = le.fit_transform(df[col])
+            label_encoders[col] = le
 
         X = df.drop("Sleep Disorder", axis=1)
         y = df["Sleep Disorder"]
 
-        # split + scale
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=SEED)
-        scaler = StandardScaler()
-        X_train = scaler.fit_transform(X_train)
-        X_test = scaler.transform(X_test)
+        smt = SMOTETomek(random_state=SEED)
+        X_res, y_res = smt.fit_resample(X, y)
 
-        # 5 models only ✅
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_res, y_res, test_size=0.2, stratify=y_res, random_state=SEED
+        )
+
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+
+        st.info("⏳ Training models...")
+
         models = {
-            "SVM": SVC(probability=True, random_state=SEED),
-            "Random Forest": RandomForestClassifier(n_estimators=200, max_depth=20, random_state=SEED),
+            "SVM": SVC(C=1, kernel="rbf", probability=True, random_state=SEED),
+            "Random Forest": RandomForestClassifier(n_estimators=300, max_depth=20, random_state=SEED),
             "LightGBM": LGBMWrapper(LGBMClassifier(n_estimators=300, learning_rate=0.05, random_state=SEED)),
+            "CatBoost": CatBoostClassifier(iterations=300, verbose=0, random_state=SEED),
             "XGBoost": XGBClassifier(eval_metric="mlogloss", use_label_encoder=False, random_state=SEED),
-            "ANN": MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=400, random_state=SEED)
+            "ANN": MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=500, random_state=SEED),
         }
 
-        results = []
-        best_acc = 0
-        best_model = None
-        best_name = ""
-
+        results = {}
         for name, model in models.items():
-            model.fit(X_train, y_train)
-            preds = model.predict(X_test)
-            acc = accuracy_score(y_test, preds)
-            results.append([name, acc])
+            model.fit(X_train_scaled, y_train)
+            results[name] = accuracy_score(y_test, model.predict(X_test_scaled))
 
-            if acc > best_acc:
-                best_acc = acc
-                best_model = model
-                best_name = name
+        acc_df = pd.DataFrame(list(results.items()), columns=["Model", "Accuracy"])
+        acc_df["Accuracy"] = (acc_df["Accuracy"] * 100).round(2)
+        st.table(acc_df)
 
-        # display accuracies
-        res_df = pd.DataFrame(results, columns=["Model", "Accuracy"])
-        res_df["Accuracy"] = (res_df["Accuracy"] * 100).round(2)
-        st.table(res_df.sort_values(by="Accuracy", ascending=False))
+        best_model_name = acc_df.iloc[acc_df["Accuracy"].idxmax()]["Model"]
+        st.success(f"🏆 Best Model: {best_model_name}")
 
-        st.success(f"🏆 Best Model: {best_name} ({res_df['Accuracy'].max()}%)")
-
-        # save best
-        st.session_state.best_model = best_model
-        st.session_state.best_acc = best_acc
+        st.session_state.best_model = models[best_model_name]
         st.session_state.scaler = scaler
-        st.session_state.label_encoders = encoders
-        st.session_state.feature_order = X.columns.tolist()
+        st.session_state.label_encoders = label_encoders
+        st.session_state.feature_order = list(X.columns)
 
-        pickle.dump(st.session_state, open("best_model.pkl", "wb"))  # ✅ auto-save
-        st.info("✅ Best model saved automatically!")
+        cm = confusion_matrix(y_test, models[best_model_name].predict(X_test_scaled))
+        fig, ax = plt.subplots()
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax)
+        st.pyplot(fig)
 
-# ---------------- BULK PREDICTION ----------------
-elif page == "🔮 Predict":
+        if st.button("💾 Save Best Model"):
+            save_model(models[best_model_name], scaler, label_encoders, list(X.columns))
+            st.success("✅ Model saved!")
+
+# 🔮 Predict Disorder
+elif page == "🔮 Predict Disorder":
+    st.title("🔮 Predict Sleep Disorder")
     if "best_model" not in st.session_state:
-        st.warning("Train or load model first!")
+        st.warning("Train or load a model first!")
     else:
-        file = st.file_uploader("Upload CSV without target", type="csv")
-        if file:
-            new_df = pd.read_csv(file)
+        mode = st.radio("Prediction Mode", ["Manual Input", "Bulk Prediction"])
 
-            # encode categoricals safely
+        if mode == "Manual Input":
+            gender = st.selectbox("Gender", ["Male", "Female"])
+            age = st.slider("Age", 1, 100, 25)
+            occupation = st.selectbox("Occupation", ["Software Engineer", "Doctor", "Nurse", "Teacher", "Manager", "Student"])
+            sleep_dur = st.slider("Sleep Duration", 3.0, 12.0, 7.0)
+            q_sleep = st.slider("Quality of Sleep", 1, 10, 7)
+            phys_act = st.slider("Physical Activity Level", 0, 100, 50)
+            stress = st.slider("Stress Level", 1, 10, 5)
+            bmi_cat = st.selectbox("BMI Category", ["Normal", "Overweight", "Obese", "Underweight"])
+            sys_bp = st.slider("Systolic BP", 80, 180, 120)
+            dia_bp = st.slider("Diastolic BP", 50, 120, 80)
+            hr = st.slider("Heart Rate", 40, 120, 70)
+            steps = st.slider("Daily Steps", 0, 20000, 5000)
+
+            user_data = pd.DataFrame([{
+                "Gender": gender, "Age": age, "Occupation": occupation,
+                "Sleep Duration": sleep_dur, "Quality of Sleep": q_sleep,
+                "Physical Activity Level": phys_act, "Stress Level": stress,
+                "BMI Category": bmi_cat, "Systolic_BP": sys_bp,
+                "Diastolic_BP": dia_bp, "Heart Rate": hr, "Daily Steps": steps
+            }])
+
             for col, le in st.session_state.label_encoders.items():
-                if col in new_df.columns:
-                    new_df[col] = new_df[col].apply(lambda x: x if str(x) in le.classes_ else le.classes_[0])
-                    new_df[col] = le.transform(new_df[col].astype(str))
+                if col in user_data.columns:
+                    if user_data[col].iloc[0] not in le.classes_:
+                        le.classes_ = np.append(le.classes_, user_data[col].iloc[0])
+                    user_data[col] = le.transform(user_data[col])
 
-            # add/align missing columns
-            for f in st.session_state.feature_order:
-                if f not in new_df.columns:
-                    new_df[f] = 0
+            user_data = user_data[st.session_state.feature_order]
 
-            new_df = new_df[st.session_state.feature_order]
-            X_scaled = st.session_state.scaler.transform(new_df.astype(float))
-            preds = st.session_state.best_model.predict(X_scaled)
+            if st.button("🔮 Predict"):
+                scaled = st.session_state.scaler.transform(user_data)
+                pred_num = st.session_state.best_model.predict(scaled)[0]
+                target_encoder = st.session_state.label_encoders["Sleep Disorder"]
+                pred_label = target_encoder.inverse_transform([pred_num])[0]
 
-            # decode target
-            target_le = st.session_state.label_encoders.get("Sleep Disorder")
-            decoded = target_le.inverse_transform(preds.astype(int)) if target_le else preds
+                st.success(f"🩺 Predicted Sleep Disorder: {pred_label}")
 
-            new_df["Predicted Sleep Disorder"] = decoded
-            st.success("✅ Predictions done!")
-            st.dataframe(new_df.head())
+        else:
+            file = st.file_uploader("Upload CSV without Sleep Disorder", type=["csv"])
+            if file:
+                new_df = pd.read_csv(file)
+                if "Blood Pressure" in new_df.columns:
+                    new_df[["Systolic_BP", "Diastolic_BP"]] = new_df["Blood Pressure"].str.split("/", expand=True).astype(int)
+                    new_df.drop("Blood Pressure", axis=1, inplace=True)
 
-            csv = new_df.to_csv(index=False).encode()
-            st.download_button("📥 Download Predictions", csv, "predictions.csv")
+                for col, le in st.session_state.label_encoders.items():
+                    if col in new_df.columns:
+                        new_df[col] = new_df[col].apply(lambda x: x if x in le.classes_ else le.classes_[0])
+                        new_df[col] = le.transform(new_df[col])
 
-# ---------------- FEATURE IMPORTANCE ----------------
-elif page == "📊 Interpret":
+                new_df = new_df[st.session_state.feature_order]
+                scaled = st.session_state.scaler.transform(new_df)
+                preds = st.session_state.best_model.predict(scaled)
+
+                target_encoder = st.session_state.label_encoders["Sleep Disorder"]
+                preds_labels = target_encoder.inverse_transform(preds)
+
+                new_df["Predicted_Sleep_Disorder"] = preds_labels
+                st.dataframe(new_df.head())
+
+# 📊 Interpretability
+elif page == "📊 Interpretability":
+    st.title("📊 Model Interpretability - Feature Importance")
     if "best_model" not in st.session_state:
-        st.warning("Train/Load model first!")
+        st.warning("Train or load a model first!")
     elif "df" not in st.session_state:
         st.warning("Upload dataset first!")
     else:
+        best_model = st.session_state.best_model
+        scaler = st.session_state.scaler
+        feature_order = st.session_state.feature_order
         df = st.session_state.df.copy()
-        X = df.drop("Sleep Disorder", axis=1)[st.session_state.feature_order]
+
+        label_encoders = st.session_state.label_encoders
+        for col in label_encoders:
+            if col in df.columns and df[col].dtype == "object":
+                le = label_encoders[col]
+                df[col] = df[col].apply(lambda x: x if x in le.classes_ else le.classes_[0])
+                df[col] = le.transform(df[col])
+
+        X = df[feature_order]
         y = df["Sleep Disorder"]
+        if y.dtype == "object":
+            le_target = label_encoders.get("Sleep Disorder")
+            y_encoded = le_target.transform(y) if le_target else y
+        else:
+            y_encoded = y
 
-        # encode again if needed
-        for col, le in st.session_state.label_encoders.items():
-            if col in X.columns:
-                X[col] = le.transform(X[col].astype(str))
+        X_scaled = scaler.transform(X)
 
-        X_scaled = st.session_state.scaler.transform(X.astype(float))
+        st.info("⏳ Calculating permutation importance...")
 
-        try:
-            imp = permutation_importance(st.session_state.best_model, X_scaled, y, n_repeats=5, random_state=SEED)
-            importance = imp.importances_mean
-        except:
-            importance = st.session_state.best_model.feature_importances_
+        result = permutation_importance(
+            best_model, X_scaled, y_encoded,
+            n_repeats=10, random_state=SEED, scoring="accuracy"
+        )
 
-        # plot
-        plt.figure()
-        plt.barh(st.session_state.feature_order, importance)
-        plt.gca().invert_yaxis()
-        st.pyplot(plt)
+        sorted_idx = result.importances_mean.argsort()[::-1]
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        sns.barplot(x=result.importances_mean[sorted_idx], y=np.array(feature_order)[sorted_idx], ax=ax)
+        ax.set_title("Permutation Feature Importance")
+        ax.set_xlabel("Mean Importance")
+        st.pyplot(fig)
+        st.success("✅ Feature importance calculated successfully!")
