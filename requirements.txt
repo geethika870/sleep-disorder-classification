@@ -1,10 +1,11 @@
-streamlit
-pandas
-numpy
-scikit-learn==1.5.2
+deap
 xgboost
 lightgbm
 catboost
-imbalanced-learn
+imblearn
+numpy
+pandas
+scikit-learn
 matplotlib
 seaborn
+imbalanced-learn
