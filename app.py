@@ -1,4 +1,4 @@
- import streamlit as st
+import streamlit as st
 import pandas as pd
 import numpy as np
 import pickle, joblib, os, random
@@ -246,3 +246,4 @@ elif page == "📊 Interpretability":
         ax.set_xlabel("Mean Importance")
         st.pyplot(fig)
         st.success("✅ Feature importance calculated successfully!")
+
